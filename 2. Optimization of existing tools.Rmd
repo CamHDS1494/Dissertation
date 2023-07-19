@@ -1,0 +1,1824 @@
+---
+title: "Optimization of cell-type annotation tools"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Optimization of 4 tools
+## SingleCellNet
+### Train the classifier
+1      Immune cells
+2       Hepatocytes
+3    Cholangiocytes
+4    Stellate cells
+5 Endothelial cells
+
+After the training data binarized using the top gene-pairs, we use it to built a multi-class Random Forest classifier with 1000 trees. We create 70 randomized single cell profile by randomly permutating the expression matrix within the training data, which can help in cases where some cell types that are present in the query data are not included in the training data. The addition category in the multi-class Random Forest classifier serves as a “Garagbe Collector” so that query cells whose true cell identity is not contained in the training data set will not be coerced into the most similar cell type within the training. 
+
+```{r}
+# Add sample names
+stTM$cell <- NAFLD_NASH@assays[["SCT"]]@counts@Dimnames[[2]]
+
+# Split for training and assessment, and transform training data
+set.seed(100) #can be any random seed number
+stList = splitCommon(sampTab = stTM, ncells = 1000, dLevel = "cell_type")
+stTrain = stList[[1]] # 1000 samples per category for training
+
+expTrain = expTMraw[,rownames(stTrain)]
+
+
+# Train the classifier
+system.time(class_info<-scn_train(stTrain = stTrain, expTrain = expTrain, nTopGenes = 10, nRand = 70, 
+                                  nTrees = 1000, nTopGenePairs = 25, dLevel = "cell_type", colName_samp = "cell"))
+
+# nRand:	number of random profiles generaten
+# TopGenes:	the number of classification genes per category
+# nTopGenePairs: the number of top gene pairs per category for training
+
+```
+
+
+### Assess the classifier with heldout data
+We first template match the held-out data or the test data to binarize the test data according the top gene pairs selected above. Then we query or classify the test data set through the TP-RF classifier. After assessing it Precision-Recall curve, we can see almost all the performances of each category within the TP-RF classifier are near perfect (area under PR curve = 1). Then we can confidently proceed to query data set of interest to the TP-RF classifier.
+```{r}
+# Apply to held out data - validation data
+
+stTestList = splitCommon(sampTab=stList[[2]], ncells = 200, dLevel="cell_type") 
+stTest = stTestList[[1]]
+# stTest = stList[[2]] 
+expTest = expTMraw[,rownames(stTest)]
+# predict
+classRes_val_all = scn_predict(cnProc=class_info[['cnProc']], expDat = expTest, nrand = 100)
+
+```
+
+
+Use more held out data
+```{r}
+# Apply to held out data - validation data
+
+# stTestList2 = splitCommon(sampTab=stList[[2]], ncells = 200, dLevel="cell_type") 
+# stTest2 = stTestList[[1]]
+stTest2 = stList[[2]] 
+expTest2 = expTMraw[,rownames(stTest2)]
+# predict
+classRes_val_all2 = scn_predict(cnProc=class_info[['cnProc']], expDat = expTest2, nrand = 100)
+
+# Assess classifier
+tm_heldoutassessment = assess_comm(ct_scores = classRes_val_all2, stTrain = stTrain, stQuery = stTest2, 
+                                   dLevelSID = "cell", classTrain = "cell_type", classQuery = "cell_type", nRand = 100)
+
+# Visualization
+plot_PRs(tm_heldoutassessment)
+plot_metrics(tm_heldoutassessment)
+
+```
+
+
+```{r}
+# Assess classifier
+tm_heldoutassessment = assess_comm(ct_scores = classRes_val_all, stTrain = stTrain, stQuery = stTest, 
+                                   dLevelSID = "cell", classTrain = "cell_type", classQuery = "cell_type", nRand = 100)
+
+# Visualization
+plot_PRs(tm_heldoutassessment)
+plot_metrics(tm_heldoutassessment)
+```
+
+
+```{r}
+# Classification result heatmap
+# Create a name vector label used later in classification heatmap where the values are 
+# cell types/ clusters and names are the sample names
+nrand = 100
+sla = as.vector(stTest$cell_type)
+names(sla) = as.vector(stTest$cell)
+slaRand = rep("rand", nrand) 
+names(slaRand) = paste("rand_", 1:nrand, sep='')
+sla = append(sla, slaRand) #include in the random cells profile created
+sc_hmClass(classMat = classRes_val_all,grps = sla, max=300, isBig=TRUE)
+```
+
+```{r}
+# Attribution plot
+plot_attr(classRes=classRes_val_all, sampTab=stTest, nrand=nrand, dLevel="cell_type", sid="cell")
+
+
+# Viusalize average top pairs genes expression for training data
+gpTab = compareGenePairs(query_exp = expTest, training_exp = expTrain, training_st = stTrain, classCol = "cell_type", 
+                         sampleCol = "cell", RF_classifier = class_info$cnProc$classifier, numPairs = 40, trainingOnly= TRUE)
+train = findAvgLabel(gpTab = gpTab, stTrain = stTrain, dLevel = "cell_type")
+hm_gpa_sel(gpTab, genes = class_info$cnProc$xpairs, grps = train, maxPerGrp = 50)
+```
+
+```{r}
+# Classification annotation assignment
+## This classifies a cell with  the catgory with the highest classification score or higher than a classification score threshold of your choosing.
+## The annotation result can be found in a column named category in the query sample table.
+stTest <- get_cate(classRes = classRes_val_all, sampTab = stTest, 
+                   dLevel = "cell_type", sid = "cell", nrand = nrand)
+```
+
+```{r}
+# Classification result violin plot
+sc_violinClass(sampTab = stTest, classRes = classRes_val_all, sid = "cell", 
+               dLevel = "cell_type", addRand = nrand, ncol=5)
+
+```
+
+
+```{r}
+# Skyline plot of classification results
+library(viridis)
+stKid2 = addRandToSampTab(classRes_val_all, stTest, "cell_type", "cell")
+skylineClass(classRes_val_all, "Immune cells", stKid2, "cell_type", .25, "cell")
+
+stKid2 = addRandToSampTab(classRes_val_all, stTest, "cell_type", "cell")
+skylineClass(classRes_val_all, "Cholangiocytes", stKid2, "cell_type", .25, "cell")
+
+stKid2 = addRandToSampTab(classRes_val_all, stTest, "cell_type", "cell")
+skylineClass(classRes_val_all, "Endothelial cells", stKid2, "cell_type", .25, "cell")
+
+stKid2 = addRandToSampTab(classRes_val_all, stTest, "cell_type", "cell")
+skylineClass(classRes_val_all, "Hepatocytes", stKid2, "cell_type", .25, "cell")
+
+stKid2 = addRandToSampTab(classRes_val_all, stTest, "cell_type", "cell")
+skylineClass(classRes_val_all, "Stellate cells", stKid2, "cell_type", .25, "cell")
+```
+
+```{r}
+system.time(ump_prep <- prep_umap_class(classRes_val_all, stTest, nrand = nrand, dLevel="cell_type", 
+                                       sid="cell", topPC = 10))
+plot_umap(ump_prep) 
+
+```
+
+```{r}
+stTest$umap1 <- raw_umap_liver[rownames(stTest), "umapharmonyma3000theta2_1"]
+stTest$umap2 <- raw_umap_liver[rownames(stTest), "umapharmonyma3000theta2_2"]
+
+ggplot(stTest, aes(umap1, umap2, col=category)) + geom_point() + theme_bw()
+ggplot(stTest, aes(umap1, umap2, col=cell_type)) + geom_point() + theme_bw()
+
+```
+
+
+
+### Assess parameters
+
+#### Try different data
+```{r}
+# Split for training and assessment, and transform training data
+# Set a series of seeds
+set.seed(100) 
+seeds = sample(1:100, 10, replace = F)
+
+accuracy_dat <- c()
+kappa_dat <- c()
+AUPRC_dat <- c()
+
+data_assess <- function(seed) {
+  set.seed(seed)
+  stList = splitCommon(sampTab = stTM, ncells = 500, dLevel = "cell_type")
+  stTrain = stList[[1]] # 500 samples per category for training
+  expTrain = expTMraw[,rownames(stTrain)]
+  
+  # Train the classifier
+  system.time(class_info<-scn_train(stTrain = stTrain, expTrain = expTrain, nTopGenes = 10, nRand = 100, 
+                                    nTrees = 1000, nTopGenePairs = 25, dLevel = "cell_type", colName_samp = "cell"))
+  
+  # Predict
+  stTestList = splitCommon(sampTab=stList[[2]], ncells = 200, dLevel="cell_type") 
+  stTest = stTestList[[1]] # 200 samples per category for validation
+  expTest = expTMraw[,rownames(stTest)]
+  classRes_val_all = scn_predict(cnProc=class_info[['cnProc']], expDat = expTest, nrand = 100)
+  
+  # Assessment
+  tm_heldoutassessment = assess_comm(ct_scores = classRes_val_all, stTrain = stTrain, stQuery = stTest, 
+                                   dLevelSID = "cell", classTrain = "cell_type", classQuery = "cell_type", nRand = 100)
+
+  accuracy_dat <<- c(accuracy_dat, tm_heldoutassessment$accuracy) 
+  kappa_dat <<- c(kappa_dat, tm_heldoutassessment$kappa) 
+  AUPRC_dat <<- c(AUPRC_dat, tm_heldoutassessment$AUPRC_w) 
+
+}
+
+
+for (seed in seeds){
+  data_assess(seed)
+}
+
+plot(accuracy_dat)
+plot(kappa_dat)
+plot(AUPRC_dat)
+
+```
+
+
+```{r}
+set.seed(100) 
+seeds2 = sample(1:100, 10, replace = F)
+
+seeds_df <- data.frame(seeds = c(seeds2, seeds2, seeds2),
+                       Measurement_value = c(accuracy_dat, kappa_dat, AUPRC_dat),
+                       Measurement = c(replicate(length(seeds2), "accuracy_seed"),
+                                       replicate(length(seeds2), "kappa_seed"),
+                                       replicate(length(seeds2), "AUPRC_seed")))
+```
+
+```{r}
+ggplot(seeds_df, aes(as.factor(seeds), Measurement_value, fill = Measurement)) + xlab("Seed") +
+  geom_bar(stat = "identity") + facet_grid(.~Measurement)
+```
+
+```{r}
+plot(accuracy_dat)
+plot(kappa_dat)
+plot(AUPRC_dat)
+```
+
+
+#### Try different nTrees
+```{r}
+# Split for training and assessment, and transform training data
+# Set a series of seeds
+trees = seq(100, 1000, 100)
+
+accuracy_tree <- c()
+kappa_tree <- c()
+AUPRC_tree <- c()
+
+ntree_assess <- function(tree) {
+  set.seed(99)
+  stList = splitCommon(sampTab = stTM, ncells = 500, dLevel = "cell_type")
+  stTrain = stList[[1]] # 500 samples per category for training
+  expTrain = expTMraw[,rownames(stTrain)]
+  
+  # Train the classifier
+  system.time(class_info<-scn_train(stTrain = stTrain, expTrain = expTrain, nTopGenes = 10, nRand = 100, 
+                                    nTrees = tree, nTopGenePairs = 25, dLevel = "cell_type", colName_samp = "cell"))
+  
+  # Predict
+  stTestList = splitCommon(sampTab=stList[[2]], ncells = 200, dLevel="cell_type") 
+  stTest = stTestList[[1]] # 200 samples per category for validation
+  expTest = expTMraw[,rownames(stTest)]
+  classRes_val_all = scn_predict(cnProc=class_info[['cnProc']], expDat = expTest, nrand = 100)
+  
+  # Assessment
+  tm_heldoutassessment = assess_comm(ct_scores = classRes_val_all, stTrain = stTrain, stQuery = stTest, 
+                                   dLevelSID = "cell", classTrain = "cell_type", classQuery = "cell_type", nRand = 100)
+
+  accuracy_tree <<- c(accuracy_tree, tm_heldoutassessment$accuracy) 
+  kappa_tree <<- c(kappa_tree, tm_heldoutassessment$kappa) 
+  AUPRC_tree <<- c(AUPRC_tree, tm_heldoutassessment$AUPRC_w) 
+
+}
+
+
+for (tree in trees){
+  ntree_assess(tree)
+}
+```
+
+
+```{r}
+trees_df <- data.frame(trees = c(trees, trees, trees), 
+                               Measurement_value = c(accuracy_tree, kappa_tree, AUPRC_tree),
+                               Measurement = c(replicate(length(trees), "accuracy_tree"),
+                                               replicate(length(trees), "kappa_tree"),
+                                               replicate(length(trees), "AUPRC_tree")))
+#ggplot(trees_df, aes(nTopGenes, Measurement_value, fill = Measurement)) + 
+#  geom_bar(stat = "identity", position = "dodge") 
+ggplot(trees_df, aes(trees, Measurement_value, fill = Measurement)) + 
+  geom_bar(stat = "identity") + facet_grid(.~Measurement)
+
+```
+
+
+
+#### Try different nTopGenes
+```{r}
+# Split for training and assessment, and transform training data
+# Set a series of seeds
+nTopGenes = seq(10, 20, 2)
+
+accuracy_gene <- c()
+kappa_gene <- c()
+AUPRC_gene <- c()
+
+ngene_assess <- function(ngene) {
+  set.seed(99)
+  stList = splitCommon(sampTab = stTM, ncells = 500, dLevel = "cell_type")
+  stTrain = stList[[1]] # 500 samples per category for training
+  expTrain = expTMraw[,rownames(stTrain)]
+  
+  # Train the classifier
+  system.time(class_info<-scn_train(stTrain = stTrain, expTrain = expTrain, nTopGenes = ngene, nRand = 100, 
+                                    nTrees = 800, nTopGenePairs = 25, dLevel = "cell_type", colName_samp = "cell"))
+  
+  # Predict
+  stTestList = splitCommon(sampTab=stList[[2]], ncells = 200, dLevel="cell_type") 
+  stTest = stTestList[[1]] # 200 samples per category for validation
+  expTest = expTMraw[,rownames(stTest)]
+  classRes_val_all = scn_predict(cnProc=class_info[['cnProc']], expDat = expTest, nrand = 100)
+  
+  # Assessment
+  tm_heldoutassessment = assess_comm(ct_scores = classRes_val_all, stTrain = stTrain, stQuery = stTest, 
+                                   dLevelSID = "cell", classTrain = "cell_type", classQuery = "cell_type", nRand = 100)
+
+  accuracy_gene <<- c(accuracy_gene, tm_heldoutassessment$accuracy) 
+  kappa_gene <<- c(kappa_gene, tm_heldoutassessment$kappa) 
+  AUPRC_gene <<- c(AUPRC_gene, tm_heldoutassessment$AUPRC_w) 
+
+}
+
+
+for (ngene in nTopGenes){
+  ngene_assess(ngene)
+}
+```
+
+```{r}
+nTopGenes_df <- data.frame(nTopGenes = c(nTopGenes, nTopGenes, nTopGenes), 
+                               Measurement_value = c(accuracy_gene, kappa_gene, AUPRC_gene),
+                               Measurement = c(replicate(length(nTopGenes), "accuracy_gene"),
+                                               replicate(length(nTopGenes), "kappa_gene"),
+                                               replicate(length(nTopGenes), "AUPRC_gene")))
+#ggplot(nTopGenes_df, aes(nTopGenes, Measurement_value, fill = Measurement)) + 
+#  geom_bar(stat = "identity", position = "dodge") 
+ggplot(nTopGenes_df, aes(nTopGenes, Measurement_value, fill = Measurement)) + 
+  geom_bar(stat = "identity") + facet_grid(.~Measurement)
+
+```
+
+
+
+#### Try different nTopGenePairs
+```{r}
+# Split for training and assessment, and transform training data
+# Set a series of seeds
+nTopGenePairs = c(1,3,5,7,9,11,13,15,17,19,21,23,25)
+
+accuracy_pair <- c()
+kappa_pair <- c()
+AUPRC_pair <- c()
+
+npair_assess <- function(npair) {
+  set.seed(99)
+  stList = splitCommon(sampTab = stTM, ncells = 500, dLevel = "cell_type")
+  stTrain = stList[[1]] # 500 samples per category for training
+  expTrain = expTMraw[,rownames(stTrain)]
+  
+  # Train the classifier
+  system.time(class_info<-scn_train(stTrain = stTrain, expTrain = expTrain, nTopGenes = 10, nRand = 100, 
+                                    nTrees = 800, nTopGenePairs = npair, dLevel = "cell_type", colName_samp = "cell"))
+  
+  # Predict
+  stTestList = splitCommon(sampTab=stList[[2]], ncells = 200, dLevel="cell_type") 
+  stTest = stTestList[[1]] # 200 samples per category for validation
+  expTest = expTMraw[,rownames(stTest)]
+  classRes_val_all = scn_predict(cnProc=class_info[['cnProc']], expDat = expTest, nrand = 100)
+  
+  # Assessment
+  tm_heldoutassessment = assess_comm(ct_scores = classRes_val_all, stTrain = stTrain, stQuery = stTest, 
+                                   dLevelSID = "cell", classTrain = "cell_type", classQuery = "cell_type", nRand = 100)
+
+  accuracy_pair <<- c(accuracy_pair, tm_heldoutassessment$accuracy) 
+  kappa_pair <<- c(kappa_pair, tm_heldoutassessment$kappa) 
+  AUPRC_pair <<- c(AUPRC_pair, tm_heldoutassessment$AUPRC_w) 
+
+}
+
+
+for (npair in nTopGenePairs){
+  npair_assess(npair)
+}
+```
+
+
+
+```{r}
+nTopGenePairs_df <- data.frame(nTopGenePairs = c(nTopGenePairs, nTopGenePairs, nTopGenePairs), 
+                               Measurement_value = c(accuracy_pair, kappa_pair, AUPRC_pair),
+                               Measurement = c(replicate(length(nTopGenePairs), "accuracy_pair"),
+                                               replicate(length(nTopGenePairs), "kappa_pair"),
+                                               replicate(length(nTopGenePairs), "AUPRC_pair")))
+#ggplot(nTopGenePairs_df, aes(nTopGenePairs, Measurement_value, fill = Measurement)) + 
+#  geom_bar(stat = "identity", position = "dodge") 
+ggplot(nTopGenePairs_df, aes(nTopGenePairs, Measurement_value, fill = Measurement)) + 
+  geom_bar(stat = "identity") + facet_grid(.~Measurement)
+
+```
+
+
+
+
+
+
+
+
+
+## ScType
+we first load 2 ScType functions:
+```{r}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+# load auto-detection function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/auto_detect_tissue_type.R")
+
+
+# load libraries
+lapply(c("dplyr","Seurat","HGNChelper", "openxlsx"), library, character.only = T)
+```
+
+
+
+Next, let's prepare gene sets from the input cell marker file. By default, we use our in-built cell marker DB, however, feel free to use your own data. Just prepare an input XLSX file in the same format as our DB file. DB file should contain four columns (tissueType - tissue type, cellName - cell type, geneSymbolmore1 - positive marker genes, geneSymbolmore2 - marker genes not expected to be expressed by a cell type)
+
+In addition, provide a tissue type your data belongs to:
+```{r}
+# DB file
+db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue = "Liver" 
+# e.g. Immune system,Pancreas,Liver,Eye,Kidney,Brain,Lung,Adrenal,Heart,Intestine,Muscle,Placenta,Spleen,Stomach,Thymus 
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_, tissue)
+
+# guess a tissue type
+tissue_guess = auto_detect_tissue_type(path_to_db_file = db_, seuratObject = NAFLD_NASH, scaled = TRUE, assay = "SCT")  
+# if saled = TRUE, make sure the data is scaled, as seuratObject[[assay]]@scale.data is used. If you just created a Seurat object, without any scaling and normalization, set scaled = FALSE, seuratObject[[assay]]@counts will be used         
+tissue_guess
+```
+
+
+Dimension reduction and visulization
+```{r}
+# Check number of PC components
+ElbowPlot(NAFLD_NASH, reduction = "pca_ma3000")
+```
+
+Clustering and visualization:
+I selected 5 PCs for downstream analysis, based on Elbow plot
+```{r}
+NAFLD_NASH <- FindNeighbors(NAFLD_NASH, dims = 1:5, reduction = "pca_ma3000", k.param = 20)
+NAFLD_NASH <- FindClusters(NAFLD_NASH, resolution = 0.5, algorithm = 3)
+# 1 = original Louvain algorithm; 2 = Louvain algorithm with multilevel refinement; 3 = SLM algorithm; 4 = Leiden algorithm
+DimPlot(NAFLD_NASH, reduction = "umap_harmonyMA3000theta2")
+```
+
+
+
+
+
+Finally, let's assign cell types to each cluster:
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = NAFLD_NASH@assays$SCT@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(NAFLD_NASH@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[,rownames(NAFLD_NASH@meta.data[NAFLD_NASH@meta.data$seurat_clusters==cl,])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, 
+                    ncells = sum(NAFLD_NASH@meta.data$seurat_clusters==cl)), 10)
+}))
+
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+
+Please note that sctype_score function (used above) accepts both positive and negative markers through gs and gs2 arguments. In case, there are no negative markers (i.e. markers providing evidence against a cell being of specific cell type) just set gs2 argument to NULL (i.e. gs2 = NULL).
+
+
+We can also overlay the identified cell types on UMAP plot:
+```{r}
+NAFLD_NASH@meta.data$annotate_cell_type = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  NAFLD_NASH@meta.data$annotate_cell_type[NAFLD_NASH@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(NAFLD_NASH, reduction = "umap_harmonyMA3000theta2", label = TRUE, repel = TRUE, group.by = 'annotate_cell_type')        
+
+```
+
+
+In addition, one can visualize a bubble plot showing all the cell types that were considered by ScType for cluster annotation. The outter (grey) bubbles correspond to each cluster (the bigger bubble, the more cells in the cluster), while the inner bubbles correspond to considered cell types for each cluster, with the biggest bubble corresponding to assigned cell type.
+
+```{r}
+# load libraries
+lapply(c("ggraph","igraph","tidyverse", "data.tree", "dplyr", "patchwork"), library, character.only = T)
+
+# prepare edges
+cL_resutls=cL_resutls[order(cL_resutls$cluster),]; edges = cL_resutls; edges$type = paste0(edges$type,"_",edges$cluster); edges$cluster = paste0("cluster ", edges$cluster); edges = edges[,c("cluster", "type")]; colnames(edges) = c("from", "to"); rownames(edges) <- NULL
+
+# prepare nodes
+nodes_lvl1 = sctype_scores[,c("cluster", "ncells")]; nodes_lvl1$cluster = paste0("cluster ", nodes_lvl1$cluster); nodes_lvl1$Colour = "#f1f1ef"; nodes_lvl1$ord = 1; nodes_lvl1$realname = nodes_lvl1$cluster; nodes_lvl1 = as.data.frame(nodes_lvl1); nodes_lvl2 = c(); 
+ccolss= c("#5f75ae","#92bbb8","#64a841","#e5486e","#de8e06","#eccf5a","#b5aa0f","#e4b680","#7ba39d","#b15928","#ffff99", "#6a3d9a","#cab2d6","#ff7f00","#fdbf6f","#e31a1c","#fb9a99","#33a02c","#b2df8a","#1f78b4","#a6cee3")
+for (i in 1:length(unique(cL_resutls$cluster))){
+  dt_tmp = cL_resutls[cL_resutls$cluster == unique(cL_resutls$cluster)[i], ]; 
+  nodes_lvl2 = rbind(nodes_lvl2, 
+                     data.frame(cluster = paste0(dt_tmp$type,"_",dt_tmp$cluster), 
+                                ncells = dt_tmp$scores, Colour = ccolss[i], ord = 2, realname = dt_tmp$type))
+}
+nodes = ""; nodes = rbind(nodes_lvl1, nodes_lvl2); nodes$ncells[nodes$ncells<1] = 1;
+files_db = openxlsx::read.xlsx(db_)[,c("cellName","shortName")]; files_db = unique(files_db); 
+files_db = files_db[which(!rownames(files_db) %in% c("42", "74", "49", "135", "39", "26")),]
+
+nodes = merge(nodes, files_db, all.x = T, all.y = F, by.x = "realname", by.y = "cellName", sort = F)
+nodes$shortName[is.na(nodes$shortName)] = nodes$realname[is.na(nodes$shortName)]; nodes = nodes[,c("cluster", "ncells", "Colour", "ord", "shortName", "realname")]
+
+mygraph <- graph_from_data_frame(edges, vertices=nodes)
+
+# Make the graph
+gggr<- ggraph(mygraph, layout = 'circlepack', weight=I(ncells)) + 
+  geom_node_circle(aes(filter=ord==1,fill=I("#F5F5F5"), colour=I("#D3D3D3")), alpha=0.9) + geom_node_circle(aes(filter=ord==2,fill=I(Colour), colour=I("#D3D3D3")), alpha=0.9) +
+  theme_void() + geom_node_text(aes(filter=ord==2, label=shortName, colour=I("#ffffff"), fill="white", repel = !1, parse = T, size = I(log(ncells,25)*1.5)))+ geom_node_label(aes(filter=ord==1,  label=shortName, colour=I("#000000"), size = I(3), fill="white", parse = T), repel = !0, segment.linetype="dotted")
+  
+
+DimPlot(NAFLD_NASH, reduction = "umap_harmonyMA3000theta2", label = TRUE, repel = TRUE, cols = ccolss) + gggr
+
+
+``` 
+
+
+
+### Apply ScTye on immune cells to explore whether it can identify subtypes
+1. Subset the immune cells from the original dataset
+```{r}
+immune <- NAFLD_NASH[,which(NAFLD_NASH@meta.data$cell_type=="Immune cells")]
+```
+
+2. Normalization through SCTransform
+```{r}
+immune <- SCTransform(immune, verbose = FALSE, # vars.to.regress = "percent.mito",
+                     variable.features.n = immune@assays$SCT@counts@Dim[1])
+```
+
+3. Feature selection
+```{r}
+var_features_immune <- immune@assays[["SCT"]]@var.features
+n_var <- 3000
+var_features_immune <- var_features_immune[1:n_var]
+
+top10 <- head(var_features_immune, 10)
+plot1 <- VariableFeaturePlot(immune, selection.method = "sct")
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+print(head(var_features_immune, 30))
+
+n_abundant <- 3000
+most_abundant_immune <- rownames(immune@assays$SCT)[order(Matrix::rowSums(immune@assays$SCT), decreasing=TRUE)] 
+most_abundant_immune <- most_abundant_immune[1:n_abundant]
+print(head(most_abundant_immune, 30))
+
+```
+
+
+4. PCA
+```{r}
+
+immune <- RunPCA(immune, assay = "SCT", npcs = 30, approx = F, verbose = F, features = var_features_SCT)
+```
+
+```{r}
+pca_results_immune <- immune@reductions$pca@cell.embeddings %>% as.data.frame() %>% 
+  cbind(nCount_RNA = immune@meta.data$nCount_RNA, nFeature_RNA = immune@meta.data$nFeature_RNA,
+        percent.mito = immune@meta.data$percent.mt, percent.rp = immune@meta.data$percent.rp,
+        Disease_status = immune@meta.data$Disease_status)
+```
+
+Visualization of pca results under differnt meta data with scTransform
+```{r}
+DimPlot(immune, dims = c(1,2), reduction = "pca")
+DimPlot(immune, dims = c(1,2), reduction = "pca", group.by = "Disease_status") # no obvious batch effects found
+
+ggplot(pca_results_immune, aes(PC_1, PC_2, col=log(nCount_RNA))) + geom_point() + theme_bw()
+ggplot(pca_results_immune, aes(PC_1, PC_2, col=log(nFeature_RNA))) + geom_point() + theme_bw()
+ggplot(pca_results_immune, aes(PC_1, PC_2, col=percent.mito)) + geom_point() + theme_bw()
+ggplot(pca_results_immune, aes(PC_1, PC_2, col=percent.rp)) + geom_point() + theme_bw()
+
+```
+
+
+```{r}
+VizDimLoadings(immune, dims = 1:2, reduction = "pca")
+ElbowPlot(immune, ndims = 30)
+```
+
+
+5. UMAP
+```{r}
+immune <- RunUMAP(immune,reduction = "pca",features = var_features_SCT,
+                 min.dist = 0.3, metric = "cosine", verbose = F)
+raw_umap_immune <- immune@reductions$umap@cell.embeddings %>%  as.data.frame() %>% 
+  cbind(nCount_RNA = immune@meta.data$nCount_RNA, nFeature_RNA = immune@meta.data$nFeature_RNA,
+        percent.mito = immune@meta.data$percent.mt, percent.rp = immune@meta.data$percent.rp,
+        Disease_status = immune@meta.data$Disease_status)
+```
+
+```{r umap visualization}
+DimPlot(immune, reduction = "umap")
+DimPlot(immune, reduction = "umap", group.by = "Disease_status")
+
+ggplot(raw_umap_immune, aes(UMAP_1, UMAP_2, col=log(nCount_RNA))) + geom_point() + theme_bw()
+ggplot(raw_umap_immune, aes(UMAP_1, UMAP_2, col=log(nFeature_RNA))) + geom_point() + theme_bw()
+ggplot(raw_umap_immune, aes(UMAP_1, UMAP_2, col=percent.mito)) + geom_point() + theme_bw()
+ggplot(raw_umap_immune, aes(UMAP_1, UMAP_2, col=percent.rp)) + geom_point() + theme_bw()
+
+```
+
+
+
+6. Assessment of feature stability
+```{r}
+steps <- seq(from = 500, to = 3000, by = 500)
+ma_hv_genes_intersection_sets_immune <- sapply(steps, function(x) {intersect(most_abundant_immune[1:x], var_features_immune[1:x])})
+ma_hv_genes_intersection_immune <- Reduce(union, ma_hv_genes_intersection_sets_immune)
+ma_hv_steps_immune <- sapply(ma_hv_genes_intersection_sets_immune, length)
+n_cores <- 3
+n_repetitions <- 30
+```
+
+
+```{r}
+
+pca_feature_stability_object_immune1 = assess_feature_stability(data_matrix = immune@assays[["SCT"]]@scale.data, 
+                                                       feature_set = var_features_immune,
+                                                       steps = steps,
+                                                       n_repetitions = n_repetitions, 
+                                                       feature_type = "HV", 
+                                                       graph_reduction_type = "PCA", 
+                                                       npcs = 30,
+                                                       min_dist = 0.3,
+                                                       n_neighbors = 30,
+                                                       metric = "cosine",
+                                                       ncores = n_cores,
+                                                       ecs_thresh = 1,
+                                                       algorithm = 1,
+                                                       resolution = c(0.25, 0.5, 0.75, 1))
+```
+
+```{r}
+pca_feature_stability_object_immune2 = assess_feature_stability(data_matrix = immune@assays[["SCT"]]@scale.data, 
+                                                       feature_set = most_abundant_immune, 
+                                                       steps = steps,
+                                                       n_repetitions = n_repetitions, 
+                                                       feature_type = "MA", 
+                                                       graph_reduction_type = "PCA", 
+                                                       npcs = 30,
+                                                       min_dist = 0.3,
+                                                       n_neighbors = 30,
+                                                       metric = "cosine",
+                                                       ncores = n_cores,
+                                                       ecs_thresh = 1,
+                                                       algorithm = 1,
+                                                       resolution = c(0.25, 0.5, 0.75, 1))
+```
+
+```{r}
+pca_feature_stability_object_immune3 = assess_feature_stability(data_matrix = immune@assays[["SCT"]]@scale.data, 
+                                                       feature_set = ma_hv_genes_intersection_immune,
+                                                       steps = ma_hv_steps_immune, 
+                                                       n_repetitions = n_repetitions, 
+                                                       feature_type = "MA_HV", 
+                                                       graph_reduction_type = "PCA", 
+                                                       npcs = 30,
+                                                       min_dist = 0.3,
+                                                       n_neighbors = 30,
+                                                       metric = "cosine",
+                                                       ncores = n_cores,
+                                                       ecs_thresh = 1,
+                                                       algorithm = 1,
+                                                       resolution = c(0.25, 0.5, 0.75, 1))
+```
+
+```{r}
+pca_feature_stability_object_immune = c(pca_feature_stability_object_immune1, 
+                                        pca_feature_stability_object_immune2,
+                                        pca_feature_stability_object_immune3)
+
+```
+
+```{r}
+plot_feature_overall_stability_boxplot(pca_feature_stability_object_immune3, 
+                                       text_size = 2.5, boxplot_width = 0.4, dodge_width = 0.7) +
+  theme(legend.position = c(1,0), legend.justification = c(1,0))
+```
+
+```{r}
+plot_feature_per_resolution_stability_incremental (pca_feature_stability_object_immune2, 
+                                                   dodge_width = 0.6, 
+                                                   text_size = 2,
+                                                   resolution = 0.75) + 
+  theme(legend.position = c(1,0), legend.justification = c(1,0)) # + geom_boxplot(width = 0.1)
+```
+
+Cluster annotation
+```{r}
+# Marker gene file
+db_lab = "/NAFLD_NASH_marker_genes_v4.xlsx"
+tissue = "Liver" 
+# e.g. Immune system,Pancreas,Liver,Eye,Kidney,Brain,Lung,Adrenal,Heart,Intestine,Muscle,Placenta,Spleen,Stomach,Thymus 
+
+# prepare gene sets
+gs_list = gene_sets_prepare(db_lab, tissue)
+
+# guess a tissue type
+#tissue_guess = auto_detect_tissue_type(path_to_db_file = db_lab, seuratObject = NAFLD_NASH, scaled = TRUE, assay = "SCT")  
+# if saled = TRUE, make sure the data is scaled, as seuratObject[[assay]]@scale.data is used. If you just created a Seurat object, without any scaling and normalization, set scaled = FALSE, seuratObject[[assay]]@counts will be used         
+#tissue_guess
+```
+
+
+Clustering and visualization:
+I selected 5 PCs for downstream analysis, based on Elbow plot
+To cluster more subpopulations, I choose higher resolution at 1
+```{r}
+immune <- FindNeighbors(immune, dims = 1:10, reduction = "pca", k.param = 20)
+immune <- FindClusters(immune, resolution = 0.8, algorithm = 3)
+# 1 = original Louvain algorithm; 2 = Louvain algorithm with multilevel refinement; 3 = SLM algorithm; 4 = Leiden algorithm
+DimPlot(immune, reduction = "umap")
+```
+
+
+Finally, let's assign cell types to each cluster:
+```{r}
+# get cell-type by cell matrix
+es.max = sctype_score(scRNAseqData = immune@assays$SCT@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
+# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
+# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
+
+# merge by cluster
+cL_resutls = do.call("rbind", lapply(unique(immune@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[,rownames(immune@meta.data[immune@meta.data$seurat_clusters==cl,])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, 
+                    ncells = sum(immune@meta.data$seurat_clusters==cl)), 10)
+}))
+
+sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+```
+
+
+
+We can also overlay the identified cell types on UMAP plot:
+```{r}
+immune@meta.data$annotate_cell_type = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  immune@meta.data$annotate_cell_type[immune@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+DimPlot(immune, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'annotate_cell_type')        
+
+```
+
+Visualization
+```{r}
+# load libraries
+lapply(c("ggraph","igraph","tidyverse", "data.tree", "dplyr", "patchwork"), library, character.only = T)
+
+# prepare edges
+cL_resutls=cL_resutls[order(cL_resutls$cluster),]; edges = cL_resutls; edges$type = paste0(edges$type,"_",edges$cluster); edges$cluster = paste0("cluster ", edges$cluster); edges = edges[,c("cluster", "type")]; colnames(edges) = c("from", "to"); rownames(edges) <- NULL
+
+# prepare nodes
+nodes_lvl1 = sctype_scores[,c("cluster", "ncells")]; nodes_lvl1$cluster = paste0("cluster ", nodes_lvl1$cluster); nodes_lvl1$Colour = "#f1f1ef"; nodes_lvl1$ord = 1; nodes_lvl1$realname = nodes_lvl1$cluster; nodes_lvl1 = as.data.frame(nodes_lvl1); nodes_lvl2 = c(); 
+ccolss= c("#5f75ae","#92bbb8","#64a841","#e5486e","#de8e06","#eccf5a","#b5aa0f","#e4b680","#7ba39d","#b15928","#ffff99", "#6a3d9a","#cab2d6","#ff7f00","#fdbf6f","#e31a1c","#fb9a99","#33a02c","#b2df8a","#1f78b4","#a6cee3")
+for (i in 1:length(unique(cL_resutls$cluster))){
+  dt_tmp = cL_resutls[cL_resutls$cluster == unique(cL_resutls$cluster)[i], ]; 
+  nodes_lvl2 = rbind(nodes_lvl2, 
+                     data.frame(cluster = paste0(dt_tmp$type,"_",dt_tmp$cluster), 
+                                ncells = dt_tmp$scores, Colour = ccolss[i], ord = 2, realname = dt_tmp$type))
+}
+nodes = ""; nodes = rbind(nodes_lvl1, nodes_lvl2); nodes$ncells[nodes$ncells<1] = 1;
+files_db = openxlsx::read.xlsx(db_)[,c("cellName","shortName")]; files_db = unique(files_db); 
+#files_db = files_db[which(!rownames(files_db) %in% c("42", "74", "49", "135", "39", "26")),]
+
+nodes = merge(nodes, files_db, all.x = T, all.y = F, by.x = "realname", by.y = "cellName", sort = F)
+nodes$shortName[is.na(nodes$shortName)] = nodes$realname[is.na(nodes$shortName)]; nodes = nodes[,c("cluster", "ncells", "Colour", "ord", "shortName", "realname")]
+
+mygraph <- graph_from_data_frame(edges, vertices=nodes)
+
+# Make the graph
+gggr<- ggraph(mygraph, layout = 'circlepack', weight=I(ncells)) + 
+  geom_node_circle(aes(filter=ord==1,fill=I("#F5F5F5"), colour=I("#D3D3D3")), alpha=0.9) + geom_node_circle(aes(filter=ord==2,fill=I(Colour), colour=I("#D3D3D3")), alpha=0.9) +
+  theme_void() + geom_node_text(aes(filter=ord==2, label=shortName, colour=I("#ffffff"), fill="white", repel = !1, parse = T, size = I(log(ncells,25)*1.5)))+ geom_node_label(aes(filter=ord==1,  label=shortName, colour=I("#000000"), size = I(3), fill="white", parse = T), repel = !0, segment.linetype="dotted")
+
+```
+
+```{r}
+DimPlot(immune, reduction = "umap", label = TRUE, repel = TRUE, cols = ccolss) + gggr
+gggr
+```
+
+Plot heatmap to compare cluster and cell-types
+```{r}
+library(pheatmap)
+library(tidyverse)
+```
+
+```{r}
+cL_resutls_wide <- reshape(cL_resutls[,1:3], direction = "wide", idvar = "type", timevar = "cluster")
+pheatmap(as.matrix(cL_resutls_wide[,-1]))
+```
+
+
+```{r}
+all.markers <- FindAllMarkers(immune, features = most_abundant_immune)
+head(all.markers) 
+```
+
+```{r}
+all.markers_filter <- all.markers[which(abs(all.markers$avg_log2FC)>0.5),]
+jacc_index_immune <- matrix(data = 0, nrow = 10, ncol = 18)
+
+for (i in (1:length(gs_list$gs_positive))){
+  for (j in (1:18)){
+    cell_type_marker <- gs_list$gs_positive[i]
+    cluster_marker <- c(all.markers[which(all.markers$cluster==j), "gene"])
+    # cluster_marker <- c(all.markers_filter[which(all.markers_filter$cluster==j), "gene"])
+
+    # jacc_index <- length(intersect(cluster_marker, cell_type_marker)) / length(union(cluster_marker, cell_type_marker))
+    inter_marker <- length(intersect(cluster_marker, cell_type_marker))
+    jacc_index_immune[i,j] <- inter_marker
+  }
+}
+
+jacc_index_immune
+```
+
+
+
+
+
+
+
+
+## Garnett
+
+### install Garnett
+```{r}
+# First install Bioconductor and Monocle 3
+# if (!requireNamespace("BiocManager"))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install()
+
+# Next install a few more dependencies
+# BiocManager::install(c('BiocGenerics', 'DelayedArray', 'DelayedMatrixStats',
+#                        'limma', 'S4Vectors', 'SingleCellExperiment',
+#                        'SummarizedExperiment'))
+```
+
+
+```{r}
+# BiocManager::install(c('BiocGenerics', 'DelayedArray', 'DelayedMatrixStats',
+#                        'limma', 'lme4', 'S4Vectors', 'SingleCellExperiment',
+#                        'SummarizedExperiment', 'batchelor', 'HDF5Array',
+#                        'terra', 'ggrastr'))
+
+
+# devtools::install_github('cole-trapnell-lab/leidenbase')
+# devtools::install_github('cole-trapnell-lab/monocle3')
+# devtools::install_github("cole-trapnell-lab/garnett", ref="monocle3")
+# BiocManager::install(c("monocle"))
+# devtools::install_github("cole-trapnell-lab/garnett")
+```
+
+
+
+### load libraries
+```{r}
+library(Seurat)
+library(monocle3)
+library(tidyverse)
+library(patchwork)
+library(garnett)
+```
+
+
+### transform Seurat object to CDS
+```{r}
+data <- GetAssayData(NAFLD_NASH, assay ='SCT', slot ='counts')
+
+cell_metadata <- NAFLD_NASH@meta.data
+gene_annotation <- data.frame(gene_short_name = rownames(data))
+rownames(gene_annotation) <- rownames(data)
+
+cds <- new_cell_data_set(data,
+                        cell_metadata = cell_metadata,
+                        gene_metadata = gene_annotation)
+
+# pd <- new("AnnotatedDataFrame", data = cell_metadata)
+# fd <- new("AnnotatedDataFrame", data = gene_annotation)
+# cds <- newCellDataSet(data, phenoData = cell_metadata, featureData = gene_annotation)
+# cds <- newCellDataSet(as.matrix(NAFLD_NASH@assays), phenoData = pd, featureData = fd)
+
+
+```
+
+
+
+```{r}
+# pheno-data
+pData(cds)
+# expression matrix
+exprs(cds)
+```
+
+```{r}
+# preprocess_cds: combine log and size factor (or only size factor ) to normalize the data. Then, preprocess_cds will calculate a low dimensional space with PCA，which will be used for further analysis like tSNE & UMAP
+cds <- preprocess_cds(cds, num_dim = 30)
+
+
+# whether the PCs capture most of the variation 
+# in gene expression across all the cells in the data set?
+monocle3::plot_pc_variance_explained(cds)
+```
+
+
+
+
+```{r}
+cds <- reduce_dimension(cds, reduction_method = "UMAP")
+plot_cells(cds)
+```
+
+
+
+```{r}
+### Clustering
+cds <- cluster_cells(cds, resolution = 0.7, k = 22, cluster_method = "leiden")
+
+
+# based on cluster to label
+plot_cells(cds, color_cells_by = "partition", group_cells_by = "partition", reduction_method = "UMAP")
+ # plot_cells(cds, color_cells_by = "cell_type")
+ 
+```
+
+Identify the genes most specifically expressed in groups of cells
+```{r}
+# Find marker genes expressed by each cluster
+marker_test_res <- top_markers(cds, group_cells_by = "partition", reference_cells = 1000, cores = 8)
+
+# colnames(marker_test_res)
+top_specific_markers <- marker_test_res %>%
+  filter(fraction_expressing >= 0.10) %>%
+  group_by(cell_group) %>%
+  top_n(1, pseudo_R2)
+ 
+top_specific_marker_ids <- unique(top_specific_markers %>% pull(gene_id))
+# Create a dot plot to visualize the mean gene expression and percentage of expressed cells in each group of cells
+plot_genes_by_group(cds,
+                    top_specific_marker_ids,
+                    group_cells_by="partition",
+                    ordering_type="maximal_on_diag",
+                    max.size=3)
+
+
+```
+
+
+
+Check the markers chosen for the marker file and generate a table of useful statistics. The *check_marker* will output:
+
+*nominates* The number of cells the marker is estimated to nominate to the cell type
+*total_nominated* The total number of cells nominated by all the markers for that cell type
+*exclusion_dismisses* The number of cells no longer nominated to the cell type if this marker is excluded (i.e. not captured by other markers for the cell type)
+*inclusion_ambiguates* How many cells become ambiguous (i.e. are nominated to multiple cell types) if this marker is included
+*most_overlap* The cell type that most often shares this marker (i.e. is the other side of the ambiguity). If inclusion_ambiguates is 0, most_overlap is NA
+*ambiguity* inclusion_ambiguates/nominates - if high, consider excluding this marker
+*marker_score* (1/(ambiguity + .01)) * nominates/total_nominated - a general measure of the quality of a marker. Higher is better
+*summary* A summary column that identifies potential problems with the provided markers
+
+```{r}
+library(org.Hs.eg.db)
+#marker_file_path <- system.file("extdata", "pbmc_bad_markers.txt", package = "garnett")
+
+#cds_training <- choose_cells(cds)
+marker_file_path <- "Garnett_liver_marker.txt"
+marker_check <- check_markers(cds, marker_file_path,
+                              db = org.Hs.eg.db,
+                              cds_gene_id_type = "SYMBOL",
+                              marker_file_gene_id_type = "SYMBOL")
+```
+
+```{r}
+plot_markers(marker_check[which(marker_check$cell_type=="Hepatocytes"),], amb_marker_cutoff = 0.7, label_size = 0.1)
+# amb_marker_cutoff:	Numeric. Cutoff at which to label ambiguous markers. Default 0.5
+```
+
+
+
+
+### Train the classifier
+
+Now it's time to train the classifier. The arguments should be pretty close to those for check_markers. The one parameter I am changing from default below is the num_unknown argument. This tells Garnett how many outgroup cells it should compare against. The default is 500, but in this dataset with so few cells we want fewer.
+
+```{r}
+set.seed(99)
+
+liver_garnett <- train_cell_classifier(cds = cds,
+                                       marker_file = "Garnett_liver_marker.txt",
+                                       max_training_samples = 300,
+                                       min_observations = 20,
+                                       db = org.Hs.eg.db,
+                                       cds_gene_id_type = "SYMBOL",
+                                       num_unknown = 50,
+                                       marker_file_gene_id_type = "SYMBOL",
+                                       #lambdas = c(0.3, 0.5, 0.7),
+                                       return_initial_assign = F)
+
+```
+
+
+### Viewing the classification genes
+Garnett classification is trained using a multinomial elastic-net regression. This means that certain genes are chosen as the relevant genes for distinguishing between cell types. Which genes are chosen may be of interest, so Garnett includes a function to access the chosen genes. Note: Garnett does not regularize the input markers, so they will be included in the classifier regardless.
+
+The function we use to see the relevant genes is get_feature_genes. The arguments are the classifier, which node you'd like to view (if your tree is hierarchical) - use "root" for the top node and the parent cell type name for other nodes, and the db for your species. The function will automatically convert the gene IDs to SYMBOL if you set convert_ids = TRUE.
+
+```{r}
+feature_genes <- get_feature_genes(liver_garnett, 
+                                   node = "root",
+                                   db = org.Hs.eg.db,
+                                   convert_ids = T)
+head(feature_genes)
+```
+
+
+```{r}
+cds2 <- classify_cells(cds, liver_garnett,
+                           db = org.Hs.eg.db,
+                           cluster_extend = TRUE,
+                           cds_gene_id_type = "SYMBOL")
+
+
+# head(pData(cds))
+# The true labels
+table(pData(cds)$cell_type)
+# Annotation: it predicts the cell-types to the original input cell_type column, thus I create a new cds2 to save this information
+table(pData(cds2)$cell_type)
+# Extended annotation
+table(pData(cds2)$cluster_ext_type)
+# confusionMatrix(table(pData(cds)$cell_type, pData(cds2)$cluster_ext_type))
+```
+
+
+
+```{r}
+cds.meta <- subset(pData(cds), select = c("cell_type", "cluster_ext_type")) %>% as.data.frame()
+NAFLD_NASH <- AddMetaData(NAFLD_NASH, metadata = cds.meta)
+
+garnett_plot <- DimPlot(NAFLD_NASH, group.by = "cluster_ext_type", label = T, label.size = 3, repel = T) +
+  ggtitle("Classfied by Garnett")
+
+garnett_plot
+```
+
+
+
+
+### plot the importance of specfic genes in each partition
+```{r}
+top_specific_marker_Hepatocytes <- c('ALB,ASGR1', 'AL391117.1', 'TFR2', 'APOC1', 'ADH4', 'HPX', 'C3', 'FGB', 'PLG', 'FYB2', 'APOB', 'GHR', 'TENM2', 'CYP3A4', 'CYP3A7')
+top_specific_marker_Cholangiocytes <- c('CFTR', 'BICC1', 'PKHD1', 'CTNND2', 'RAYL')
+top_specific_marker_Stellate <- c('DCN', 'COL3A1', 'PTH1R', 'ADAMTSL2', 'CCBE1', 'ADAMTS2', 'ADAMTSL1')
+top_specific_marker_Endothelial <- c('KDR', 'FCN3', 'FLT1', 'OIT3', 'STAB2', 'TEK', 'PTPRB', 'FCN2')
+top_specific_marker_Lymphocytes <- c('IL7R', 'CD96', 'BCL11B', 'THEMIS', 'CD247', 'PTPRC')
+top_specific_marker_Macrophages <- c('NDST3', 'MARCO', 'CD163', 'MSR1', 'GAS7', 'CD5L')
+# top_specific_marker_Neutrophils <- c('FCN1')
+top_specific_marker_Bcells.pop1 <- c('BANK1', 'PAX5', 'IGKC', 'FCRL5')
+top_specific_marker_Bcells.pop2_Neutrophils <- c('FCN1', 'IGKC', 'FCRL5')
+top_specific_marker_cancerStem <- c('ANPEP', 'CD44', 'EPCAM', 'POU5F1', 'PROM1', 'THY1')
+```
+
+Create a dot plot to visualize the mean gene expression and percentage of expressed cells in each group of cells
+```{r}
+p1 <- plot_genes_by_group(cds2, top_specific_marker_Hepatocytes,
+                    group_cells_by="partition", ordering_type="maximal_on_diag", max.size=3)
+p2 <- plot_markers(marker_check[which(marker_check$cell_type=="Hepatocytes"),], 
+                   amb_marker_cutoff = 0.7, label_size = 0.1)
+plot(p1 / p2)
+```
+
+```{r}
+p1 <- plot_genes_by_group(cds, top_specific_marker_Cholangiocytes,
+                    group_cells_by="partition", ordering_type="maximal_on_diag", max.size=3)
+p2 <- plot_markers(marker_check[which(marker_check$cell_type=="Cholangiocytes"),], 
+                   amb_marker_cutoff = 0.7, label_size = 0.1)
+plot(p1 / p2)
+```
+
+```{r}
+p1 <- plot_genes_by_group(cds, top_specific_marker_Stellate,
+                    group_cells_by="partition", ordering_type="maximal_on_diag", max.size=3)
+p2 <- plot_markers(marker_check[which(marker_check$cell_type=="Stellate cells"),], 
+                   amb_marker_cutoff = 0.7, label_size = 0.1)
+plot(p1 / p2)
+```
+
+```{r}
+p1 <- plot_genes_by_group(cds, top_specific_marker_Endothelial,
+                    group_cells_by="partition", ordering_type="maximal_on_diag", max.size=3)
+p2 <- plot_markers(marker_check[which(marker_check$cell_type=="Endothelial"),], 
+                   amb_marker_cutoff = 0.7, label_size = 0.1)
+plot(p1 / p2)
+```
+
+```{r}
+p1 <- plot_genes_by_group(cds, top_specific_marker_Lymphocytes,
+                    group_cells_by="partition", ordering_type="maximal_on_diag", max.size=3)
+p2 <- plot_markers(marker_check[which(marker_check$cell_type=="Lymphocytes"),], 
+                   amb_marker_cutoff = 0.7, label_size = 0.1)
+plot(p1 / p2)
+```
+
+```{r}
+p1 <- plot_genes_by_group(cds, top_specific_marker_Macrophages,
+                    group_cells_by="partition", ordering_type="maximal_on_diag", max.size=3)
+p2 <- plot_markers(marker_check[which(marker_check$cell_type=="Macrophages"),], 
+                   amb_marker_cutoff = 0.7, label_size = 0.1)
+plot(p1 / p2)
+```
+
+```{r}
+p1 <- plot_genes_by_group(cds, top_specific_marker_Bcells.pop1,
+                    group_cells_by="partition", ordering_type="maximal_on_diag", max.size=3)
+p2 <- plot_markers(marker_check[which(marker_check$cell_type=="B cells pop1"),], 
+                   amb_marker_cutoff = 0.7, label_size = 0.1)
+plot(p1 / p2)
+```
+
+```{r}
+p1 <- plot_genes_by_group(cds, top_specific_marker_Bcells.pop2_Neutrophils,
+                    group_cells_by="partition", ordering_type="maximal_on_diag", max.size=3)
+p2 <- plot_markers(marker_check[which((marker_check$cell_type=="B cells pop2") |
+                                      (marker_check$cell_type=="Neutrophils")),], 
+                   amb_marker_cutoff = 0.7, label_size = 0.1)
+plot(p1 / p2)
+```
+
+```{r}
+p1 <- plot_genes_by_group(cds, top_specific_marker_cancerStem,
+                    group_cells_by="partition", ordering_type="maximal_on_diag", max.size=3)
+p2 <- plot_markers(marker_check[which(marker_check$cell_type=="Cancer stem cells"),], 
+                   amb_marker_cutoff = 0.7, label_size = 0.1)
+plot(p1 / p2)
+
+```
+
+
+
+### Assessment of Garnett parameters
+```{r}
+set.seed(99)
+lambda_assessment <- function(cds, lambda, max_training_samples){
+  liver_garnett <- train_cell_classifier(cds = cds,
+                                       marker_file = "Garnett_liver_marker.txt",
+                                       max_training_samples = max_training_samples,
+                                       min_observations = 10,
+                                       db = org.Hs.eg.db,
+                                       cds_gene_id_type = "SYMBOL",
+                                       num_unknown = 100,
+                                       marker_file_gene_id_type = "SYMBOL",
+                                       lambdas = lambda,
+                                       return_initial_assign = F)
+  
+  cds <- classify_cells(cds, liver_garnett,
+                           db = org.Hs.eg.db,
+                           cluster_extend = TRUE,
+                           cds_gene_id_type = "SYMBOL")
+  
+  return(confusionMatrix(table(pData(cds)$cell_type, pData(cds)$cluster_ext_type))) 
+}
+```
+
+Model will fail when lambda equals to 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7 in this dataset
+```{r}
+lambdas <- seq(0.7, 1, 0.1)
+max_training_samples <- seq(100, 500, 100)
+lambda_sensitivity <- as.data.frame(matrix(0, nrow = 10, ncol = 4))
+row.names(lambda_sensitivity) <- c('B cells pop1', 'Cancer stem cells', 'Cholangiocytes', 'Endothelial',
+                                   'Hepatocytes', 'Lymphocytes', 'Macrophages', 'Neutrophils', 'Stellate cells', 'Unknown')
+colnames(lambda_sensitivity) <- c("0.8", "0.9", "1.0")
+
+for (i in c(1:length(lambdas))){
+  Garnett_confusionMatrix <- lambda_assessment(cds, lambdas[i], 200)
+  print(Garnett_confusionMatrix$byClass[,1])
+  lambda_sensitivity[,i] <- Garnett_confusionMatrix$byClass[,1]
+}
+```
+
+```{r}
+max_training_samples <- seq(100, 500, 100)
+sample_sensitivity <- as.data.frame(matrix(0, nrow = 10, ncol = 5))
+row.names(sample_sensitivity) <- c('B cells pop1', 'Cancer stem cells', 'Cholangiocytes', 'Endothelial',
+                                   'Hepatocytes', 'Lymphocytes', 'Macrophages', 'Neutrophils', 'Stellate cells', 'Unknown')
+colnames(sample_sensitivity) <- c("100", "200", "300", "400", "500")
+
+for (i in c(1:length(max_training_samples))){
+  Garnett_confusionMatrix <- lambda_assessment(cds, NULL, max_training_samples[i])
+  print(Garnett_confusionMatrix$byClass[,1])
+  sample_sensitivity[,i] <- Garnett_confusionMatrix$byClass[,1]
+}
+```
+
+
+
+
+
+## scmap
+Transform Seurat object to SingleCellExperiment object
+```{r}
+library(scmap)
+NAFLD_NASH$cell_type <- stTM$cell_type
+liver_sce <- as.SingleCellExperiment(NAFLD_NASH)
+```
+
+### Feature Selection
+generate an object of SingleCellExperiment class with a new column in rowData(object) slot which is called scmap_features. It can be accessed by using as.data.frame(rowData(object))$scmap_features.
+```{r}
+# this is needed to calculate dropout rate for feature selection
+# important: normcounts have the same zeros as raw counts (fpkm)
+# counts(liver_sce) <- normcounts(liver_sce)
+# logcounts(liver_sce) <- log2(normcounts(liver_sce) + 1)
+
+rowData(liver_sce)$feature_symbol <- rownames(liver_sce)
+# remove features with duplicated names
+liver_sce <- liver_sce[!duplicated(rownames(liver_sce)), ]
+
+liver_sce <- selectFeatures(liver_sce, n_features = 1000, suppress_plot = F)
+```
+
+
+
+### scmap-cluster
+Index
+
+The scmap-cluster index of a reference dataset is created by finding the median gene expression for each cluster. By default scmap uses the cell_type1 column of the colData slot in the reference to identify clusters. Other columns can be manually selected by adjusting cluster_col parameter:
+
+```{r}
+colData(liver_sce)$cell_type1 <- liver_sce$cell_type
+liver_sce <- indexCluster(liver_sce)
+#liver_sce <- indexCluster(liver_sce, cluster_col = liver_sce$cell_type)
+head(metadata(liver_sce)$scmap_cluster_index)
+```
+
+```{r}
+# Identify and remove zero variance features
+scmap_cluster_index <- t(metadata(liver_sce)$scmap_cluster_index)
+nzv <- nearZeroVar(scmap_cluster_index, saveMetrics=T)
+near.zero.variance <- rownames(nzv[nzv$nzv==TRUE,])
+print(length(near.zero.variance)) 
+print(head(near.zero.variance))
+# Identify and remove highly correlated features
+scmap_cluster_index <- scmap_cluster_index[,!(colnames(scmap_cluster_index)%in%near.zero.variance)]
+
+heatmap(as.matrix(t(scmap_cluster_index)))
+```
+
+
+Projection
+
+Once the scmap-cluster index has been generated we can use it to project our dataset to itself (just for illustrative purposes). This can be done with one index at a time, but scmap also allows for simultaneous projection to multiple indexes if they are provided as a list:
+
+```{r}
+scmapCluster_results <- scmapCluster(
+  projection = liver_sce, 
+  index_list = list(liver_sce_index = t(scmap_cluster_index)),
+  threshold = 0.7
+)
+```
+
+
+scmap-cluster projects the query dataset to all projections defined in the index_list. The results of cell label assignements are merged into one matrix:
+
+```{r}
+head(scmapCluster_results$scmap_cluster_labs, 10)
+
+# Corresponding similarities are stored in the scmap_cluster_siml item:
+head(scmapCluster_results$scmap_cluster_siml, 10)
+
+# scmap also provides combined results of all reference dataset (choose labels corresponding to the largest similarity across reference datasets):
+head(scmapCluster_results$combined_labs, 10)
+
+# print out the correct cell label
+head(liver_sce$cell_type, 10)
+```
+
+
+Visualisation
+
+The results of scmap-cluster can be visualized as a Sankey diagram to show how cell-clusters are matched (getSankey() function). Note that the Sankey diagram will only be informative if both the query and the reference datasets have been clustered, but it is not necessary to have meaningful labels assigned to the query (cluster1, cluster2 etc. is sufficient):
+```{r}
+plot(
+  getSankey(
+    colData(liver_sce)$cell_type1, 
+    # scmapCluster_results$scmap_cluster_labs[,'liver_sce_index'],
+    scmapCluster_results$combined_labs,
+    plot_height = 400
+  )
+)
+```
+
+
+```{r}
+# table(scmapCluster_results$combined_labs, colData(liver_sce)$cell_type1)
+# confusionMatrix(as.factor(scmapCluster_results$combined_labs), as.factor(colData(liver_sce)$cell_type1))
+liver_sce_cell_type <- factor(colData(liver_sce)$cell_type1, 
+                                levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                           'Immune cells', 'Stellate cells', 'unassigned'))
+liver_sce_predict_cell <- factor(scmapCluster_results$combined_labs, 
+                                   levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                              'Immune cells', 'Stellate cells', 'unassigned'))
+confusionMatrix(liver_sce_predict_cell, liver_sce_cell_type)
+```
+
+
+
+
+
+
+
+
+
+### scamp-cell
+
+#### Stochasticity
+
+scmap-cell contains k-means step which makes it stochastic, i.e. running it multiple times will provide slightly different results. Therefore, we will fix a random seed, so that a user will be able to exactly reproduce our results:
+
+```{r}
+set.seed(99)
+```
+
+#### Index
+In the scmap-cell index is created by a product quantiser algorithm in a way that every cell in the reference is identified with a set of sub-centroids found via k-means clustering based on a subset of the features.
+```{r}
+liver_sce <- indexCell(liver_sce, M = 22, k = 20)
+```
+
+Unlike scmap-cluster index scmap-cell index contains information about each cell and therefore can not be easily visualised. scmap-cell index consists of two items:
+```{r}
+names(metadata(liver_sce)$scmap_cell_index)
+```
+
+
+#### Sub-centroids
+subcentroids contains coordinates of subcentroids of low dimensional subspaces defined by selected features, k and M parameters of the product quantiser algorithm (see ?indexCell).
+```{r}
+length(metadata(liver_sce)$scmap_cell_index$subcentroids)
+dim(metadata(liver_sce)$scmap_cell_index$subcentroids[[1]])
+metadata(liver_sce)$scmap_cell_index$subcentroids[[1]][,1:5]
+```
+
+
+#### Sub-clusters
+subclusters contains for every low dimensial subspace indexies of subcentroids which a given cell belongs to:
+```{r}
+dim(metadata(liver_sce)$scmap_cell_index$subclusters)
+metadata(liver_sce)$scmap_cell_index$subclusters[1:5,1:5]
+```
+
+
+#### Projection
+Once the scmap-cell indexes have been generated we can use them to project the baron dataset. This can be done with one index at a time, but scmap allows for simultaneous projection to multiple indexes if they are provided as a list:
+```{r}
+scmapCell_results <- scmapCell(
+  liver_sce, 
+  list(scmap_cell_index = metadata(liver_sce)$scmap_cell_index)
+)
+```
+
+#### Results
+scmapCell_results contains results of projection for each reference dataset in a list:
+```{r}
+names(scmapCell_results)
+```
+
+For each dataset there are two matricies. cells matrix contains the top 10 (scmap default) cell IDs of the cells of the reference dataset that a given cell of the projection dataset is closest to:
+```{r}
+scmapCell_results$scmap_cell_index$cells[,1:3]
+```
+
+similarities matrix contains corresponding cosine similarities:
+```{r}
+scmapCell_results$scmap_cell_index$similarities[,1:3]
+```
+
+
+#### Cluster annotation
+If cell cluster annotation is available for the reference datasets, in addition to finding top 10 nearest neighbours scmap-cell also allows to annotate cells of the projection dataset using labels of the reference. It does so by looking at the top 3 nearest neighbours (scmap default) and if they all belong to the same cluster in the reference and their maximum similarity is higher than a threshold (0.5 is the scmap default) a projection cell is assigned to a corresponding reference cluster:
+```{r}
+scmapCell_clusters <- scmapCell2Cluster(
+  scmapCell_results, 
+  list(as.character(colData(liver_sce)$cell_type1))
+)
+```
+
+scmap-cell results are in the same format as the ones provided by scmap-cluster (see above):
+```{r}
+head(scmapCell_clusters$scmap_cluster_labs, 20)
+# Corresponding similarities are stored in the scmap_cluster_siml item:
+head(scmapCell_clusters$scmap_cluster_siml, 20)
+head(scmapCell_clusters$combined_labs, 20)
+head(liver_sce$cell_type, 20)
+```
+
+
+#### Visualisation
+```{r}
+plot(
+  getSankey(
+    colData(liver_sce)$cell_type1, 
+    # scmapCell_clusters$scmap_cluster_labs,
+    scmapCell_clusters$combined_labs,
+    plot_height = 400
+  )
+)
+```
+
+```{r}
+liver_sce_cell_type <- factor(colData(liver_sce)$cell_type1, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unassigned'))
+liver_sce_predict_cell <- factor(scmapCell_clusters$combined_labs, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unassigned'))
+table(liver_sce_predict_cell, liver_sce_cell_type)
+confusionMatrix(liver_sce_predict_cell, liver_sce_cell_type)
+```
+
+
+
+
+
+#### Assessment of scmap parameters
+##### scmap_cluster
+```{r}
+scmap_cluster_Parameter <- function(seed, n_features) {
+  set.seed(seed)
+  
+  liver_sce <- selectFeatures(liver_sce, n_features = n_features, suppress_plot = FALSE)
+  liver_sce <- indexCluster(liver_sce)
+  
+  scmapCluster_results <- scmapCluster(projection = liver_sce, 
+                                       index_list = list(liver_sce_index = metadata(liver_sce)$scmap_cluster_index),
+                                       threshold = 0.7)
+
+  liver_sce_cell_type <- factor(colData(liver_sce)$cell_type1, 
+                                levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                           'Immune cells', 'Stellate cells', 'unassigned'))
+  liver_sce_predict_cell <- factor(scmapCluster_results$combined_labs, 
+                                   levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                              'Immune cells', 'Stellate cells', 'unassigned'))
+  scmap_confusionMatrix <- confusionMatrix(liver_sce_predict_cell, liver_sce_cell_type)
+  return(scmap_confusionMatrix)
+}
+
+```
+
+Feature selection: the number of N residuals for scmap_cluster
+```{r}
+liver_sce_nFeature_sensitivity <- data.frame(Sensitivity = 0, nFeature = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_nFeature_specificity <- data.frame(Specificity = 0, nFeature = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_nFeature_accuracy <- data.frame(nFeature = replicate(100, 0), Accuracy = 0)
+
+n_features <- seq(300, 2100, 200)
+for (i in c(1:length(n_features))){
+  print(i)
+  for (seed in c(1:10)){
+    scmap_confusionMatrix <- scmap_cluster_Parameter(seed, n_features[i])
+    nrow_index <- (i-1)*10+seed
+    liver_sce_nFeature_accuracy[nrow_index, "nFeature"] <- n_features[i]
+    liver_sce_nFeature_accuracy[nrow_index, "Accuracy"] <- scmap_confusionMatrix$overall[1]
+    
+    nrow_index <- (i-1)*50 + (seed-1)*5
+    for (j in c(1:5)){
+      liver_sce_nFeature_sensitivity[nrow_index+j, "nFeature"] <- n_features[i]
+      liver_sce_nFeature_sensitivity[nrow_index+j, "Sensitivity"] <- scmap_confusionMatrix$byClass[j,1]
+      liver_sce_nFeature_specificity[nrow_index+j, "nFeature"] <- n_features[i]
+      liver_sce_nFeature_specificity[nrow_index+j, "Specificity"] <- scmap_confusionMatrix$byClass[j,2]
+    }
+  }
+}
+```
+
+
+
+```{r}
+ggplot(liver_sce_nFeature_sensitivity2, aes(as.factor(nFeature), Sensitivity, col=Cell_type)) + 
+  geom_point() + theme_bw() + xlab("Number of Features") + ylim(0,1)
+ggplot(liver_sce_nFeature_specificity2, aes(as.factor(nFeature), Specificity, col=Cell_type)) + 
+  geom_point() + theme_bw() + xlab("Number of Features") + ylim(0,1)
+ggplot(liver_sce_nFeature_accuracy2, aes(as.factor(nFeature), Accuracy)) + 
+  geom_point() + theme_bw() + xlab("Number of Features") + ylim(0.4,0.8)
+
+```
+
+
+```{r}
+liver_sce_nFeature_sensitivity2 <- data.frame(Sensitivity = 0, nFeature = 0, 
+                                             Cell_type = c(replicate(10, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_nFeature_specificity2 <- data.frame(Specificity = 0, nFeature = 0, 
+                                             Cell_type = c(replicate(10, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_nFeature_accuracy2 <- data.frame(nFeature = replicate(10, 0), Accuracy = 0)
+
+n_features <- seq(25, 250, 25)
+for (i in c(1:length(n_features))){
+  print(i)
+  
+  scmap_confusionMatrix <- scmap_cluster_Parameter(seed, n_features[i])
+  nrow_index <- i
+  liver_sce_nFeature_accuracy2[nrow_index, "nFeature"] <- n_features[i]
+  liver_sce_nFeature_accuracy2[nrow_index, "Accuracy"] <- scmap_confusionMatrix$overall[1]
+  
+  nrow_index <- (i-1)*5 
+  for (j in c(1:5)){
+    liver_sce_nFeature_sensitivity2[nrow_index+j, "nFeature"] <- n_features[i]
+    liver_sce_nFeature_sensitivity2[nrow_index+j, "Sensitivity"] <- scmap_confusionMatrix$byClass[j,1]
+    liver_sce_nFeature_specificity2[nrow_index+j, "nFeature"] <- n_features[i]
+    liver_sce_nFeature_specificity2[nrow_index+j, "Specificity"] <- scmap_confusionMatrix$byClass[j,2]
+  
+  }
+}
+```
+
+
+
+##### scmap_cell
+```{r}
+scmap_Parameter <- function(liver_sce, seed, n_features, M, k) {
+  set.seed(seed)
+  # Class_sensitivity <- c()
+  # Overall_accuracy <- c()
+  
+  liver_sce <- selectFeatures(liver_sce, n_features = n_features, suppress_plot = F)
+  liver_sce <- indexCell(liver_sce, M = M, k = k)
+  print("Get index")
+  scmapCell_results <- scmapCell(
+    liver_sce, 
+    list(scmap_cell_index = metadata(liver_sce)$scmap_cell_index)
+  )
+  #print("Get scmapCell_results")
+
+  scmapCell_clusters <- scmapCell2Cluster(
+    scmapCell_results, 
+    list(as.character(colData(liver_sce)$cell_type1))
+  )
+  #print("Get scmapCell_clusters")
+
+  
+  liver_sce_cell_type <- factor(colData(liver_sce)$cell_type1, 
+                                levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                           'Immune cells', 'Stellate cells', 'unassigned'))
+  liver_sce_predict_cell <- factor(scmapCell_clusters$combined_labs, 
+                                   levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                              'Immune cells', 'Stellate cells', 'unassigned'))
+  #print("get liver_sce_predict_cell")
+  scmap_confusionMatrix <- confusionMatrix(liver_sce_predict_cell, liver_sce_cell_type)
+  # Overall_accuracy <- c(Overall_accuracy, scmap_confusionMatrix$overall[1])
+  return(scmap_confusionMatrix)
+}
+
+```
+
+Feature selection: the number of N residuals 
+```{r}
+liver_sce_cell_nFeature_sensitivity <- data.frame(Sensitivity = 0, nFeature = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_cell_nFeature_specificity <- data.frame(Specificity = 0, nFeature = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_cell_nFeature_accuracy <- data.frame(nFeature = replicate(100, 0), Accuracy = 0)
+
+n_features <- seq(60, 330, 30)
+for (i in c(1:length(n_features))){
+  print(i)
+  for (seed in c(1:10)){
+    scmap_confusionMatrix <- scmap_Parameter(liver_sce, seed, n_features[i], 22, 20)
+    nrow_index <- (i-1)*10+seed
+    liver_sce_cell_nFeature_accuracy[nrow_index, "nFeature"] <- n_features[i]
+    liver_sce_cell_nFeature_accuracy[nrow_index, "Accuracy"] <- scmap_confusionMatrix$overall[1]
+    
+    nrow_index <- (i-1)*50 + (seed-1)*5
+    for (j in c(1:5)){
+      liver_sce_cell_nFeature_sensitivity[nrow_index+j, "nFeature"] <- n_features[i]
+      liver_sce_cell_nFeature_sensitivity[nrow_index+j, "Sensitivity"] <- scmap_confusionMatrix$byClass[j,1]
+      liver_sce_cell_nFeature_specificity[nrow_index+j, "nFeature"] <- n_features[i]
+      liver_sce_cell_nFeature_specificity[nrow_index+j, "Specificity"] <- scmap_confusionMatrix$byClass[j,2]
+    }
+  }
+}
+```
+
+
+```{r}
+ggplot(liver_sce_cell_nFeature_sensitivity, aes(as.factor(nFeature), Sensitivity, fill=Cell_type)) + 
+  geom_boxplot() + theme_bw() + xlab("Number of features") 
+ggplot(liver_sce_cell_nFeature_specificity, aes(as.factor(nFeature), Specificity, fill=Cell_type)) + 
+  geom_boxplot() + theme_bw() + xlab("Number of features") + ylim(0, 1)
+ggplot(liver_sce_cell_nFeature_accuracy, aes(as.factor(nFeature), Accuracy)) + 
+  geom_boxplot() + theme_bw() + xlab("Number of features") + ylim(0.6, 1)
+
+```
+
+
+M partitions 
+```{r}
+liver_sce_cell_Msplit_sensitivity <- data.frame(Sensitivity = 0, Msplit = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_cell_Msplit_specificity <- data.frame(Specificity = 0, Msplit = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_cell_Msplit_accuracy <- data.frame(Msplit = replicate(100, 0), Accuracy = 0)
+
+Msplits <- seq(12, 30, 2)
+for (i in c(1:length(Msplits))){
+  print(i)
+  for (seed in c(1:10)){
+    scmap_confusionMatrix <- scmap_Parameter(liver_sce, seed, 300, Msplits[i], 20)
+    nrow_index <- (i-1)*10+seed
+    liver_sce_cell_Msplit_accuracy[nrow_index, "Msplit"] <- Msplits[i]
+    liver_sce_cell_Msplit_accuracy[nrow_index, "Accuracy"] <- scmap_confusionMatrix$overall[1]
+    
+    nrow_index <- (i-1)*50 + (seed-1)*5
+    for (j in c(1:5)){
+      liver_sce_cell_Msplit_sensitivity[nrow_index+j, "Msplit"] <- Msplits[i]
+      liver_sce_cell_Msplit_sensitivity[nrow_index+j, "Sensitivity"] <- scmap_confusionMatrix$byClass[j,1]
+      liver_sce_cell_Msplit_specificity[nrow_index+j, "Msplit"] <- Msplits[i]
+      liver_sce_cell_Msplit_specificity[nrow_index+j, "Specificity"] <- scmap_confusionMatrix$byClass[j,2]
+    }
+  }
+}
+```
+
+
+```{r}
+ggplot(liver_sce_cell_Msplit_sensitivity, aes(as.factor(Msplit), Sensitivity, fill=Cell_type)) + 
+  geom_boxplot() + theme_bw() + xlab("Number of Partitions")
+ggplot(liver_sce_cell_Msplit_specificity, aes(as.factor(Msplit), Specificity, fill=Cell_type)) + 
+  geom_boxplot() + theme_bw() + ylim(0, 1) + xlab("Number of Partitions")
+ggplot(liver_sce_cell_Msplit_accuracy, aes(as.factor(Msplit), Accuracy)) + 
+  geom_boxplot() + theme_bw() + ylim(0.8, 1) + xlab("Number of Partitions")
+
+```
+
+
+M partitions 
+```{r}
+liver_sce_cell_Msplit_sensitivity2 <- data.frame(Sensitivity = 0, Msplit = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_cell_Msplit_specificity2 <- data.frame(Specificity = 0, Msplit = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_cell_Msplit_accuracy2 <- data.frame(Msplit = replicate(100, 0), Accuracy = 0)
+
+Msplits <- seq(5, 50, 5)
+for (i in c(1:length(Msplits))){
+  print(i)
+  for (seed in c(1:10)){
+    scmap_confusionMatrix <- scmap_Parameter(liver_sce, seed, 300, Msplits[i], 20)
+    nrow_index <- (i-1)*10+seed
+    liver_sce_cell_Msplit_accuracy2[nrow_index, "Msplit"] <- Msplits[i]
+    liver_sce_cell_Msplit_accuracy2[nrow_index, "Accuracy"] <- scmap_confusionMatrix$overall[1]
+    
+    nrow_index <- (i-1)*50 + (seed-1)*5
+    for (j in c(1:5)){
+      liver_sce_cell_Msplit_sensitivity2[nrow_index+j, "Msplit"] <- Msplits[i]
+      liver_sce_cell_Msplit_sensitivity2[nrow_index+j, "Sensitivity"] <- scmap_confusionMatrix$byClass[j,1]
+      liver_sce_cell_Msplit_specificity2[nrow_index+j, "Msplit"] <- Msplits[i]
+      liver_sce_cell_Msplit_specificity2[nrow_index+j, "Specificity"] <- scmap_confusionMatrix$byClass[j,2]
+    }
+  }
+}
+```
+
+
+
+
+
+K neighbours
+```{r}
+liver_sce_cell_kNeighbors_sensitivity <- data.frame(Sensitivity = 0, kNeighbors = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_cell_kNeighbors_specificity <- data.frame(Specificity = 0, kNeighbors = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_cell_kNeighbors_accuracy <- data.frame(kNeighbors = replicate(100, 0), Accuracy = 0)
+
+kNeighbors <- seq(12, 30, 2)
+#kNeighbors <- seq(28, 46, 2)
+
+for (i in c(1:length(kNeighbors))){
+  print(i)
+  for (seed in c(1:10)){
+    scmap_confusionMatrix <- scmap_Parameter(liver_sce, seed, 300, 26, kNeighbors[i])
+    nrow_index <- (i-1)*10+seed
+    liver_sce_cell_kNeighbors_accuracy[nrow_index, "kNeighbors"] <- kNeighbors[i]
+    liver_sce_cell_kNeighbors_accuracy[nrow_index, "Accuracy"] <- scmap_confusionMatrix$overall[1]
+    
+    nrow_index <- (i-1)*50 + (seed-1)*5
+    for (j in c(1:5)){
+      liver_sce_cell_kNeighbors_sensitivity[nrow_index+j, "kNeighbors"] <- kNeighbors[i]
+      liver_sce_cell_kNeighbors_sensitivity[nrow_index+j, "Sensitivity"] <- scmap_confusionMatrix$byClass[j,1]
+      liver_sce_cell_kNeighbors_specificity[nrow_index+j, "kNeighbors"] <- kNeighbors[i]
+      liver_sce_cell_kNeighbors_specificity[nrow_index+j, "Specificity"] <- scmap_confusionMatrix$byClass[j,2]
+    }
+  }
+}
+```
+
+
+```{r}
+ggplot(liver_sce_cell_kNeighbors_sensitivity, aes(as.factor(kNeighbors), Sensitivity, fill=Cell_type)) + 
+  geom_boxplot() + theme_bw() + xlab("Number of Clusters") + ylim(0.7, 1)
+ggplot(liver_sce_cell_kNeighbors_specificity, aes(as.factor(kNeighbors), Specificity, fill=Cell_type)) + 
+  geom_boxplot() + theme_bw() + ylim(0.7, 1) + xlab("Number of Clusters")
+ggplot(liver_sce_cell_kNeighbors_accuracy, aes(as.factor(kNeighbors), Accuracy)) + 
+  geom_boxplot() + theme_bw() + ylim(0.8, 1) + xlab("Number of Clusters")
+
+```
+
+
+
+```{r}
+liver_sce_cell_kNeighbors_sensitivity2 <- data.frame(Sensitivity = 0, kNeighbors = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_cell_kNeighbors_specificity2 <- data.frame(Specificity = 0, kNeighbors = 0, 
+                                             Cell_type = c(replicate(100, c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 
+                                             'Immune cells', 'Stellate cells'))))
+liver_sce_cell_kNeighbors_accuracy2 <- data.frame(kNeighbors = replicate(100, 0), Accuracy = 0)
+
+kNeighbors <- seq(2, 20, 2)
+#kNeighbors <- seq(28, 46, 2)
+
+for (i in c(1:length(kNeighbors))){
+  print(i)
+  for (seed in c(1:10)){
+    scmap_confusionMatrix <- scmap_Parameter(liver_sce, seed, 300, 26, kNeighbors[i])
+    nrow_index <- (i-1)*10+seed
+    liver_sce_cell_kNeighbors_accuracy2[nrow_index, "kNeighbors"] <- kNeighbors[i]
+    liver_sce_cell_kNeighbors_accuracy2[nrow_index, "Accuracy"] <- scmap_confusionMatrix$overall[1]
+    
+    nrow_index <- (i-1)*50 + (seed-1)*5
+    for (j in c(1:5)){
+      liver_sce_cell_kNeighbors_sensitivity2[nrow_index+j, "kNeighbors"] <- kNeighbors[i]
+      liver_sce_cell_kNeighbors_sensitivity2[nrow_index+j, "Sensitivity"] <- scmap_confusionMatrix$byClass[j,1]
+      liver_sce_cell_kNeighbors_specificity2[nrow_index+j, "kNeighbors"] <- kNeighbors[i]
+      liver_sce_cell_kNeighbors_specificity2[nrow_index+j, "Specificity"] <- scmap_confusionMatrix$byClass[j,2]
+    }
+  }
+}
+```
+
+
+
+```{r}
+ggplot(liver_sce_cell_kNeighbors_sensitivity2, aes(as.factor(kNeighbors), Sensitivity, fill=Cell_type)) + 
+  geom_boxplot() + theme_bw() + xlab("Number of Clusters") + ylim(0.2, 1)
+ggplot(liver_sce_cell_kNeighbors_specificity2, aes(as.factor(kNeighbors), Specificity, fill=Cell_type)) + 
+  geom_boxplot() + theme_bw() + ylim(0.5, 1) + xlab("Number of Clusters")
+ggplot(liver_sce_cell_kNeighbors_accuracy2, aes(as.factor(kNeighbors), Accuracy)) + 
+  geom_boxplot() + theme_bw() + ylim(0.5, 1) + xlab("Number of Clusters")
+
+```
+
+
+
+
+
+
+
+
+
+
+

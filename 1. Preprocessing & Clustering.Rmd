@@ -1,0 +1,401 @@
+---
+title: "Preprocessing & Clustering for NAFLD/NASH dataset"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Load library
+```{r}
+library(singleCellNet)
+library(readr)
+library(Seurat)
+library(SeuratObject)
+library(ggplot2)
+library(dplyr)
+library(ggvenn)
+library(ClustAssess)
+library(patchwork)
+```
+
+
+# Load data
+```{r}
+path <- '/NAFLD_NASH/liver.rda'
+NAFLD_NASH = utils_loadObject(path)
+```
+
+```{r}
+expTMraw = NAFLD_NASH@assays$SCT@data
+dim(expTMraw)
+stTM = NAFLD_NASH@meta.data
+dim(stTM)
+stTM <- droplevels(stTM)
+```
+
+# Quality check
+```{r}
+#Number of detected genes:
+NODG <- colSums(NAFLD_NASH@assays$SCT@counts)
+
+#Plot NODGs ordered by rank  (rank-size distribution) and set threshold cfor ells with low NODG:
+ggplot() + geom_point(aes(x=rank(-NODG), y=NODG)) + theme_bw() + 
+  geom_abline(slope = 0, intercept = 1800, col="red") + ylab("Number of Detected Genes") + xlab("Cell")
+```
+
+
+```{r}
+#Number of cells which expressed certain genes:
+NODC <- rowSums(cuomo.counts>0)
+
+#Plot NODCs ordered by rank  (rank-size distribution) and set threshold for genes with low NODC:
+
+ggplot() + geom_point(aes(x=rank(-NODC), y=NODC)) + theme_bw() + 
+  geom_abline(slope = 0, intercept = 10, col="red") + ylab("Number of Detected Cells") + xlab("Gene")
+```
+
+
+
+# Dimensionality reduction
+## Feature selection
+```{r}
+var_features_liver <- NAFLD_NASH@assays[["SCT"]]@var.features # the first 3000 highly variable genes
+
+top10 <- head(var_features_liver, 10)
+plot1 <- VariableFeaturePlot(NAFLD_NASH, selection.method = "sct")
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+print(head(var_features_liver, 30))
+
+n_abundant <- 3000
+most_abundant_liver <- rownames(NAFLD_NASH@assays$SCT)[order(Matrix::rowSums(NAFLD_NASH@assays$SCT), decreasing=TRUE)] 
+most_abundant_liver <- most_abundant_liver[1:n_abundant]
+print(head(most_abundant_liver, 30))
+
+```
+
+
+```{r}
+steps <- seq(from = 500, to = 3000, by = 500)
+ma_hv_genes_intersection_sets_liver <- sapply(steps, function(x) {intersect(most_abundant_liver[1:x], var_features_liver[1:x])})
+ma_hv_genes_intersection_liver <- Reduce(union, ma_hv_genes_intersection_sets_liver)
+ma_hv_steps_liver <- sapply(ma_hv_genes_intersection_sets_liver, length)
+n_cores <- 3
+n_repetitions <- 30
+```
+
+
+```{r}
+pca_feature_stability_object_liver = c(get_feature_stability(data_matrix = NAFLD_NASH@assays[["SCT"]]@scale.data, 
+                                                       feature_set = most_abundant_liver, 
+                                                       steps = steps,
+                                                       n_repetitions = n_repetitions, 
+                                                       feature_type = "MA", 
+                                                       graph_reduction_type = "PCA", 
+                                                       npcs = 30,
+                                                       min_dist = 0.3,
+                                                       n_neighbors = 30,
+                                                       metric = "cosine",
+                                                       ncores = n_cores,
+                                                       ecs_thresh = 1,
+                                                       algorithm = 1),
+                                 get_feature_stability(data_matrix = NAFLD_NASH@assays[["SCT"]]@scale.data, 
+                                                       feature_set = var_features_liver,
+                                                       steps = steps,
+                                                       n_repetitions = n_repetitions, 
+                                                       feature_type = "HV", 
+                                                       graph_reduction_type = "PCA", 
+                                                       npcs = 30,
+                                                       min_dist = 0.3,
+                                                       n_neighbors = 30,
+                                                       metric = "cosine",
+                                                       ncores = n_cores,
+                                                       ecs_thresh = 1,
+                                                       algorithm = 1),
+                                 get_feature_stability(data_matrix = NAFLD_NASH@assays[["SCT"]]@scale.data, 
+                                                       feature_set = ma_hv_genes_intersection_liver,
+                                                       steps = ma_hv_steps_liver, 
+                                                       n_repetitions = n_repetitions, 
+                                                       feature_type = "MA_HV", 
+                                                       graph_reduction_type = "PCA", 
+                                                       npcs = 30,
+                                                       min_dist = 0.3,
+                                                       n_neighbors = 30,
+                                                       metric = "cosine",
+                                                       ncores = n_cores,
+                                                       ecs_thresh = 1,
+                                                       algorithm = 1))
+
+```
+
+
+
+The plot illustrates the stability assessment, across 30 runs, each with different random seeds, on the three gene sets described above. We assessed the stability of each set on incremental number of selected genes. Thus, the boxplots are arranged in groups of three (the number of evaluated feature sets); above each boxplot we specify the number of elements per subset. 
+
+```{r}
+plot_feature_stability_boxplot(pca_feature_stability_object_liver, text_size = 2.5, boxplot_width = 0.4, dodge_width = 0.7) +
+  theme(legend.position = c(1,0), legend.justification = c(1,0))
+```
+
+
+
+Another angle for assessing the stability is centered on the comparison between consecutive steps, for each feature set, performed using the Element-Centric Similarity on the most frequent partitions from each step. The aim is evaluating the effect of increasing the number of genes on the final partitions, and, indirectly, determining the transition from the signal to the noise zone. 
+
+```{r}
+plot_feature_stability_ecs_incremental(pca_feature_stability_object_liver, dodge_width = 0.6, text_size = 2) + 
+  theme(legend.position = c(1,0), legend.justification = c(1,0)) # + geom_boxplot(width = 0.1)
+```
+
+
+```{r}
+plot_feature_stability_mb_facet(pca_feature_stability_object_liver, text_size = 3)
+```
+
+
+```{r}
+plot_feature_stability_ecs_facet(pca_feature_stability_object_liver)
+```
+
+
+## PCA
+```{r}
+pca_results_liver <- NAFLD_NASH@reductions$pca_ma3000@cell.embeddings %>% as.data.frame() %>% 
+  cbind(nCount_RNA = NAFLD_NASH@meta.data$nCount_RNA, nFeature_RNA = NAFLD_NASH@meta.data$nFeature_RNA,
+        percent.mito = NAFLD_NASH@meta.data$percent.mt, percent.rp = NAFLD_NASH@meta.data$percent.rp,
+        Disease_status = NAFLD_NASH@meta.data$Disease_status, cell_type = NAFLD_NASH@meta.data$cell_type)
+```
+
+
+Visualization of pca results under differnt meta data with scTransform
+```{r}
+DimPlot(NAFLD_NASH, dims = c(1,2), reduction = "pca_ma3000")
+DimPlot(NAFLD_NASH, dims = c(1,2), reduction = "pca_ma3000", group.by = "Disease_status")
+DimPlot(NAFLD_NASH, dims = c(1,2), reduction = "pca_ma3000", group.by = "cell_type")
+
+
+ggplot(pca_results_liver, aes(PCMA3000_1, PCMA3000_2, col=log(nCount_RNA))) + geom_point() + theme_bw()
+ggplot(pca_results_liver, aes(PCMA3000_1, PCMA3000_2, col=log(nFeature_RNA))) + geom_point() + theme_bw()
+ggplot(pca_results_liver, aes(PCMA3000_1, PCMA3000_2, col=percent.mito)) + geom_point() + theme_bw()
+ggplot(pca_results_liver, aes(PCMA3000_1, PCMA3000_2, col=percent.rp)) + geom_point() + theme_bw()
+
+```
+
+```{r}
+print(NAFLD_NASH[["pca_ma3000"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(NAFLD_NASH, dims = 1:2, reduction = "pca_ma3000")
+ElbowPlot(NAFLD_NASH, reduction = "pca_ma3000")
+
+```
+
+
+
+## UMAP
+```{r}
+raw_umap_liver <- NAFLD_NASH@reductions$umap_harmonyMA3000theta2@cell.embeddings %>%  as.data.frame() %>% 
+  cbind(nCount_RNA = NAFLD_NASH@meta.data$nCount_RNA, nFeature_RNA = NAFLD_NASH@meta.data$nFeature_RNA,
+        percent.mito = NAFLD_NASH@meta.data$percent.mt, percent.rp = NAFLD_NASH@meta.data$percent.rp,
+        Disease_status = NAFLD_NASH@meta.data$Disease_status, cell_type = NAFLD_NASH@meta.data$cell_type)
+```
+
+```{r umap visualization}
+DimPlot(NAFLD_NASH, reduction = "umap_harmonyMA3000theta2")
+DimPlot(NAFLD_NASH, reduction = "umap_harmonyMA3000theta2", group.by = "Disease_status")
+DimPlot(NAFLD_NASH, reduction = "umap_harmonyMA3000theta2", group.by = "cell_type")
+
+ggplot(raw_umap_liver, aes(umapharmonyma3000theta2_1, umapharmonyma3000theta2_2, col=log(nCount_RNA))) + geom_point() + theme_bw()
+ggplot(raw_umap_liver, aes(umapharmonyma3000theta2_1, umapharmonyma3000theta2_2, col=log(nFeature_RNA))) + geom_point() + theme_bw()
+ggplot(raw_umap_liver, aes(umapharmonyma3000theta2_1, umapharmonyma3000theta2_2, col=percent.mito)) + geom_point() + theme_bw()
+ggplot(raw_umap_liver, aes(umapharmonyma3000theta2_1, umapharmonyma3000theta2_2, col=percent.rp)) + geom_point() + theme_bw()
+
+```
+
+
+
+
+# Graph construction
+The next step in a standard single-cell analysis pipeline is building the graph using the nearest neighbour algorithm. 
+The following parameters influence the final partitioning:
+1. base embedding: the graph can be built on either the PCA or the UMAP embedding (using the expression matrix isn’t recommended, as the distances would be noisier and the runtime would increase). 
+2. the number of neighbours
+3. the graph type: the graph can be either unweighted (NN case) or based on a weighted Shared-Nearest Neighbours (SNN) graph. For the latter, the weights are computed using the Jaccard Similarity Index (JSI) between the neighbourhoods of two cells.
+
+```{r}
+nn_conn_comps_object_liver = c(get_nn_conn_comps(object = NAFLD_NASH@reductions$pca_ma3000@cell.embeddings, 
+                                           n_neigh_sequence = c(c(1,2,3,4), seq(from = 5, to = 30, by = 5)),
+                                           n_repetitions = n_repetitions, 
+                                           graph_reduction_type = "UMAP", 
+                                           ncores = n_cores,
+                                           min_dist = 0.3,
+                                           n_neighbors = 30,
+                                           metric = "cosine"), 
+                         get_nn_conn_comps(object = NAFLD_NASH@assays[["SCT"]]@scale.data,
+                                           n_neigh_sequence = c(c(1,2,3,4), seq(from = 5, to = 30, by = 5)),
+                                           n_repetitions = n_repetitions, 
+                                           graph_reduction_type = "PCA", 
+                                           ncores = n_cores,
+                                           nv = 30))
+
+# object: A data matrix. If the graph reduction type is PCA, the object should be an expression matrix, with features on rows and observations on columns; in the case of UMAP, the user could also provide a matrix associated to a PCA embedding. See also the transpose argument.
+```
+
+
+
+```{r}
+plot_connected_comps_evolution(nn_conn_comps_object_liver)
+```
+
+
+
+```{r}
+nn_importance_object_liver = mapply(c,
+                              get_nn_importance(object = NAFLD_NASH@assays[["SCT"]]@scale.data,
+                                                n_neigh_sequence = seq(from = 5, to = 30, by = 5), 
+                                                n_repetitions = n_repetitions, 
+                                                graph_reduction_type = "PCA",
+                                                ecs_thresh = 1,
+                                                ncores = n_cores, 
+                                                algorithm = 1,
+                                                nv = 30),
+                              get_nn_importance(object = NAFLD_NASH@reductions$pca_ma3000@cell.embeddings, 
+                                                n_neigh_sequence = seq(from = 5, to = 30, by = 5), 
+                                                n_repetitions = n_repetitions,
+                                                graph_reduction_type = "UMAP",
+                                                ecs_thresh = 1, 
+                                                ncores = n_cores, 
+                                                algorithm = 1, 
+                                                min_dist = 0.3, 
+                                                n_neighbors = 30, 
+                                                metric = "cosine"), 
+                              SIMPLIFY = FALSE)
+```
+
+
+```{r}
+plot_n_neigh_k_correspondence(nn_importance_object_liver)
+plot_n_neigh_ecs(nn_importance_object_liver)
+```
+
+The number of shared nearest neighbors is the intersection of the kNN neighborhood of two points.
+
+
+
+
+
+
+# Graph clustering
+The final step in a standard single-cell analysis pipeline is applying a graph-based clustering method. Choosing a community detection algorithm has a significant impact on the partitioning results. Using the get_clustering_difference we assess the stability and reproducibility of results obtained using various graph clustering methods available in the Seurat package: Louvain, Louvain refined, SLM and Leiden.
+
+1) If we use UMAP embedding
+```{r}
+adj_matrix_liver = FindNeighbors(NAFLD_NASH@reductions$umap_harmonyMA3000theta2@cell.embeddings, 
+                           k.param = 25, nn.method = "rann", verbose = F)$snn
+#nn.method:	Method for nearest neighbor finding. Options include: rann, annoy
+#n.trees:	More trees gives higher precision when using annoy approximate nearest neighbor search
+
+clustering_diff_obj_liver = get_clustering_difference(graph_adjacency_matrix = adj_matrix_liver,
+                                                resolution = seq(from = 0.5, to = 1, by = 0.1), 
+                                                n_repetitions = n_repetitions, 
+                                                ecs_thresh = 0.95, 
+                                                ncores = n_cores, 
+                                                algorithm = 1:4)
+
+```
+
+
+```{r}
+plot_clustering_difference_boxplot(clustering_diff_obj_liver)
+plot_clustering_difference_facet(clustering_diff_obj_liver, NAFLD_NASH@reductions$umap_harmonyMA3000theta2@cell.embeddings)
+
+```
+
+2) if we use PCA embedding
+```{r}
+adj_matrix_liver_pca = FindNeighbors(NAFLD_NASH@reductions$pca_ma3000@cell.embeddings, 
+                           k.param = 25, nn.method = "rann", verbose = F)$snn
+#nn.method:	Method for nearest neighbor finding. Options include: rann, annoy
+#n.trees:	More trees gives higher precision when using annoy approximate nearest neighbor search
+
+clustering_diff_obj_liver_pca = get_clustering_difference(graph_adjacency_matrix = adj_matrix_liver_pca,
+                                                resolution = seq(from = 0.5, to = 1, by = 0.1), 
+                                                n_repetitions = n_repetitions, 
+                                                ecs_thresh = 0.95, 
+                                                ncores = n_cores, 
+                                                algorithm = 1:4)
+
+```
+
+
+```{r}
+plot_clustering_difference_boxplot(clustering_diff_obj_liver_pca)
+plot_clustering_difference_facet(clustering_diff_obj_liver_pca, NAFLD_NASH@reductions$umap_harmonyMA3000theta2@cell.embeddings)
+
+```
+
+The results show that using PCA embedding has more stable results.
+
+
+
+
+
+
+The get_resolution_importance evaluates the effect of a range of values for the resolution parameter on the stability of the output. Besides the resolution, the user can input multiple values of the following parameters: number of neighbours, the graph type and the clustering method. The function will return a list associated with each parameter value combination. For each resolution value, the list will contain multiple sublists of partitions corresponding to specific number of clusters.
+
+```{r}
+resolution_gridsearch_liver_pca = get_resolution_importance(embedding = NAFLD_NASH@reductions$pca_ma3000@cell.embeddings,
+                                                  resolution = seq(from = 0.5, to = 1.5, by = 0.1),
+                                                  n_neigh = 20,
+                                                  n_repetitions = n_repetitions,
+                                                  clustering_method = c(2,3),
+                                                  # Louvain (1), Louvain refined (2), SLM (3) or Leiden (4).
+                                                  graph_type = 2, # whether graph should be unweighted (0), weighted (1) or both (2)
+                                                  ecs_thresh = 0.95, # threshold used for merging similar clusterings.
+                                                  ncores = n_cores)
+```
+
+
+
+```{r}
+plot_k_resolution_corresp(resolution_gridsearch_liver_pca) +
+  plot_annotation(title = "resolution - k correspondence with ecs threshold = 0.95")
+
+plot_k_resolution_corresp(resolution_gridsearch_liver_pca, colour_information = "freq_k") + 
+  plot_annotation(title = "resolution - k correspondence with ecs threshold = 0.95")
+
+plot_k_n_partitions(resolution_gridsearch_liver_pca) + 
+  plot_annotation(title = "k - # partitions correspondence wit h ecs threshold = 0.95")
+
+plot_k_n_partitions(resolution_gridsearch_liver_pca, colour_information = "freq_part") + 
+  plot_annotation( title = "k - # partitions correspondence with ecs threshold = 0.95")
+```
+
+
+
+By default, the get_resolution_importance function (as well as the previous functions part of the assessment pipeline) relies on the merging of identical partitions. Two partitions are identical if their contingency table form a square diagonal matrix. Merging is also applied to reduce the object size and to minimize the runtime for calculating the Element-Centric Consistency score. In practice, we also noticed cases with minor differences between two partitions (only 5 cells change their cluster labels). For the merging of identical partitions, these would be classed as different, although, in practice, the biological interpretation is likely to be the same. To address this we included a similarity threshold for additional flexibility i.e.: two partitions are considered identical and will be merged if the Element-Centric Similarity Score between them is above a user-defined ECS threshold.
+
+```{r}
+resolution_gridsearch_thresh_95_liver_pca = merge_partitions(resolution_gridsearch_liver_pca2, ecs_thresh = 0.95, ncores = n_cores)
+```
+
+
+Lowering the ECS threshold leads, in general, to higher number of occurences for the most frequent partition.
+
+```{r}
+plot_k_resolution_corresp(resolution_gridsearch_thresh_95_liver_pca) +
+  plot_annotation(title = "resolution - k correspondence with ecs threshold = 0.95")
+
+plot_k_resolution_corresp(resolution_gridsearch_thresh_95_liver_pca, colour_information = "freq_k") + 
+  plot_annotation(title = "resolution - k correspondence with ecs threshold = 0.95")
+
+plot_k_n_partitions(resolution_gridsearch_thresh_95_liver_pca) +
+  plot_annotation(title = "k - # partitions correspondence with ecs threshold = 0.95")
+
+plot_k_n_partitions(resolution_gridsearch_thresh_95_liver_pca, colour_information = "frequency_partition") + 
+  plot_annotation(title = "k - # partitions correspondence with ecs threshold = 0.95")
+```
+
+
+
+

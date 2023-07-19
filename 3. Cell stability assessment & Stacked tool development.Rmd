@@ -1,0 +1,459 @@
+---
+title: "Identification of unstable cells & Tool stacking"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Split 60% training & 40% test datasets
+```{r}
+table(NAFLD_NASH@meta.data$cell_type)
+# NAFLD_NASH@meta.data$cell_ID <- colnames(NAFLD_NASH@assays$SCT)
+
+set.seed(99)
+# 26031 * 0.6 = 15618.6
+stacking_train_ID <- sample(NAFLD_NASH@meta.data$cell_ID, 16000, replace = F)
+stacking_train <- NAFLD_NASH[,which(NAFLD_NASH@meta.data$cell_ID %in% stacking_train_ID)]
+```
+
+Check the number of each cell type in the training dataset
+```{r}
+table(stacking_train@meta.data$cell_type)
+```
+
+Build the test dataset
+```{r}
+stacking_test <- NAFLD_NASH[,which(!NAFLD_NASH@meta.data$cell_ID %in% stacking_train_ID)]
+table(stacking_test@meta.data$cell_type)
+stacking_test_ID <- stacking_test@meta.data$cell_ID
+```
+
+
+
+
+# Stacking tools
+## SCN
+```{r}
+# Train the SCN classifier
+system.time(class_info<-scn_train(stTrain = stacking_train@meta.data, expTrain = stacking_train@assays$SCT@data, 
+                                  nTopGenes = 50, nRand = 100, 
+                                  nTrees = 1000, nTopGenePairs = 40, dLevel = "cell_type", colName_samp = "cell_ID"))
+```
+
+```{r}
+# Prediction: test dataset 
+classRes_val_all2 <- scn_predict(cnProc=class_info[['cnProc']], expDat = stacking_test@assays$SCT@data, nrand = 100)
+
+# Classification annotation assignment
+## This classifies a cell with  the catgory with the highest classification score or higher than a classification score threshold of your choosing.
+## The annotation result can be found in a column named *category* in the query sample table.
+stacking_SCN <- get_cate(classRes = classRes_val_all2, sampTab = stacking_test@meta.data, 
+                   dLevel = "cell_type", sid = "cell_ID", nrand = 100)
+```
+
+
+
+
+
+## ScType
+```{r}
+stacking_sctype <- stacking_test@meta.data$annotate_cell_type
+table(stacking_sctype)
+```
+
+
+
+## Garnett
+```{r}
+data <- GetAssayData(stacking_test, assay ='SCT', slot ='counts')
+
+cell_metadata <- stacking_test@meta.data
+gene_annotation <- data.frame(gene_short_name = rownames(data))
+rownames(gene_annotation) <- rownames(data)
+
+stacking_cds <- new_cell_data_set(data,
+                        cell_metadata = cell_metadata,
+                        gene_metadata = gene_annotation)
+```
+
+
+```{r}
+set.seed(99)
+stacking_garnett <- classify_cells(stacking_cds, liver_garnett,
+                           db = org.Hs.eg.db,
+                           cluster_extend = TRUE,
+                           cds_gene_id_type = "SYMBOL")
+
+# stacking_garnett <- cds2[which(pData(cds2)$cell_ID)]
+# Annotation: it predicts the cell-types to the original input cell_type column, thus I create a new cds2 to save this information
+table(pData(stacking_garnett)$cell_type)
+# Extended annotation
+table(pData(stacking_garnett)$cluster_ext_type)
+```
+
+
+
+## scmap
+### scmap-cluster
+```{r}
+stacking_scmap_cluster <- data.frame(scmap_cluster_annotation = scmapCluster_results$combined_labs, 
+                                     cell_ID = NAFLD_NASH@meta.data$cell_ID,
+                                     cell_type = NAFLD_NASH@meta.data$cell_type)
+
+stacking_scmap_cluster <- stacking_scmap_cluster[which(stacking_scmap_cluster$cell_ID %in% stacking_test_ID),]
+nrow(stacking_scmap_cluster)
+head(stacking_scmap_cluster)
+```
+
+
+### scmap-cell
+```{r}
+stacking_scmap_cell <- data.frame(scmap_cell_annotation = scmapCell_clusters$combined_labs, 
+                                  cell_ID = NAFLD_NASH@meta.data$cell_ID,
+                                  cell_type = NAFLD_NASH@meta.data$cell_type)
+
+stacking_scmap_cell <- stacking_scmap_cell[which(stacking_scmap_cell$cell_ID %in% stacking_test_ID),]
+nrow(stacking_scmap_cell)
+head(stacking_scmap_cell)
+```
+
+
+# Voting to decide the final classification results
+## Combine the classification results
+```{r}
+stacking_annotation <- data.frame(cell_ID = stacking_test_ID, cell_type = stacking_test@meta.data$cell_type,
+                                  SCN = stacking_SCN$category, ScType = stacking_sctype,
+                                  Garnett = pData(stacking_garnett)$cell_type,
+                                  Garnett_extend = pData(stacking_garnett)$cluster_ext_type,
+                                  Scmap_cluster = stacking_scmap_cluster$scmap_cluster_annotation,
+                                  Scmap_cell = stacking_scmap_cell$scmap_cell_annotation,
+                                  voting = NA, percentage = NA)
+
+head(stacking_annotation)
+```
+
+
+## Create summary category
+```{r}
+immune_name <- c("Immune cells", "Immune system cells", "B cells pop1", "Lymphocytes", 
+                 "Macrophages", "Neutrophils")
+immune_sub_name <- c("B cells pop1", "Lymphocytes", "Macrophages", "Neutrophils")
+Cholangiocytes_name <- c("Cholangiocytes")
+Endothelial_name <- c("Endothelial cells", "Endothelial cell", "Endothelial")
+Hepatocytes_name <- c("Hepatocytes")
+Stellate_name <- c("Stellate cells", "Hepatic stellate cells")
+Hematopoietic_name <- c("Hematopoietic cell")
+CancerStem_name <- c("Cancer stem cells")
+unknown_name <- c("Unknown", "unassigned")
+
+# cell_class <- c(immune_name, immune_sub_name, Cholangiocytes_name, Endothelial_name, Hepatocytes_name,
+#                Stellate_name, Hematopoietic_name, CancerStem_name, unknown_name)
+
+cell_annotate_count <- data.frame(cell_ID = stacking_annotation$cell_ID, cell_type = stacking_annotation$cell_type,
+                                  immune = 0, B_cell = 0, Lymphocytes = 0, Macrophages = 0, Neutrophils = 0,
+                                  Cholangiocytes = 0, Endothelial = 0, Hepatocytes = 0, Stellate = 0,
+                                  Hematopoietic = 0, Cancer_stem = 0, unknown = 0)
+```
+
+
+## Annotate cells with probability
+```{r}
+for (i in c(1:nrow(stacking_annotation))) {
+  # print(i)
+  for (j in c(3:8)) {
+    # print(stacking_annotation[i,j])
+    
+    if (stacking_annotation[i,j] %in% immune_name) {
+      cell_annotate_count[i,"immune"] = cell_annotate_count[i,"immune"] + 1
+      if (stacking_annotation[i,j] %in% immune_sub_name) {
+        # check whether sub-types of immune cells are given
+        if (stacking_annotation[i,j]=="B cells pop1") {
+          cell_annotate_count[i,"B_cell"] = cell_annotate_count[i,"B_cell"] + 1
+          }
+        else if (stacking_annotation[i,j]=="Lymphocytes") {
+          cell_annotate_count[i,"Lymphocytes"] = cell_annotate_count[i,"Lymphocytes"] + 1
+          }
+        else if (stacking_annotation[i,j]=="Macrophages") {
+          cell_annotate_count[i,"Macrophages"] = cell_annotate_count[i,"Macrophages"] + 1
+          }
+        else if (stacking_annotation[i,j]=="Neutrophils") {
+          cell_annotate_count[i,"Neutrophils"] = cell_annotate_count[i,"Neutrophils"] + 1
+          }
+      }
+    } 
+    else if (stacking_annotation[i,j] %in% Cholangiocytes_name) {
+      cell_annotate_count[i,"Cholangiocytes"] = cell_annotate_count[i,"Cholangiocytes"] + 1
+    }
+    else if (stacking_annotation[i,j] %in% Endothelial_name) {
+      cell_annotate_count[i,"Endothelial"] = cell_annotate_count[i,"Endothelial"] + 1
+    }
+    else if (stacking_annotation[i,j] %in% Hepatocytes_name) {
+      cell_annotate_count[i,"Hepatocytes"] = cell_annotate_count[i,"Hepatocytes"] + 1
+    }
+    else if (stacking_annotation[i,j] %in% Stellate_name) {
+      cell_annotate_count[i,"Stellate"] = cell_annotate_count[i,"Stellate"] + 1
+    }
+    else if (stacking_annotation[i,j] %in% Hematopoietic_name) {
+      cell_annotate_count[i,"Hematopoietic"] = cell_annotate_count[i,"Hematopoietic"] + 1
+    }
+    else if (stacking_annotation[i,j] %in% CancerStem_name) {
+      cell_annotate_count[i,"Cancer_stem"] = cell_annotate_count[i,"Cancer_stem"] + 1
+    }
+    else if (stacking_annotation[i,j] %in% unknown_name) {
+      cell_annotate_count[i,"unknown"] = cell_annotate_count[i,"unknown"] + 1
+    }
+  }
+  
+}
+```
+
+
+
+```{r}
+for (i in c(1:nrow(cell_annotate_count))){
+# for (i in c(1:10)){
+  tmp <- c()
+  type_index <- which.max(cell_annotate_count[i,3:14]) + 2 # the index starts from 1 but not 3, thus need to add 2; 4-7 is subtype
+  stacking_annotation$voting[i] <- colnames(cell_annotate_count)[type_index]
+  stacking_annotation$percentage[i] <- cell_annotate_count[i,type_index]/6*100
+  # print(paste0(cell_annotate_count[i,type_index]/6*100, "%"))
+  # print(stacking_annotation$voting[i])
+  # print(stacking_annotation$percentage[i])
+}
+```
+
+
+```{r}
+stacking_annotation[which(stacking_annotation$voting=="Cancer_stem"), "voting"] <- "Cancer Stem cells"
+stacking_annotation[which(stacking_annotation$voting=="Endothelial"), "voting"] <- "Endothelial cells"
+stacking_annotation[which(stacking_annotation$voting=="immune"), "voting"] <- "Immune cells"
+stacking_annotation[which(stacking_annotation$voting=="Stellate"), "voting"] <- "Stellate cells"
+
+stacking_true_cell <- factor(stacking_annotation$cell_type, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unknown', 'Cancer Stem cells', 'Hematopoietic'))
+stacking_predict_cell <- factor(stacking_annotation$voting, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unknown', 'Cancer Stem cells', 'Hematopoietic'))
+
+table(stacking_annotation$cell_type, stacking_annotation$voting)
+confusionMatrix(stacking_predict_cell, stacking_true_cell)
+```
+
+
+
+
+# Find ambiguous cells
+During feature selection step, cells are considered unstable if they are frequently clustered into different clusters. Since incremental number of features led to a more stable clustering, to avoid the number of features affecting our judgement, we chose to use the most stable results of each feature set under PCA embedding, i.e. 2000 most abundant genes, 3000 highly variable genes, 394 intersection genes, and screened out cells with less than 0.7 ECC values.
+
+UMAP plot: show the unstable cells using differnt feature set
+```{r}
+unstable_MA <- pca_feature_stability_object_liver$MA_PCA_1
+unstable_MA <- as.data.frame(unstable_MA)
+unstable_MA <- unstable_MA[which(unstable_MA$X2000.ecc<0.7),]
+nrow(unstable_MA)
+
+unstable_HV <- pca_feature_stability_object_liver$HV_PCA_1
+unstable_HV <- as.data.frame(unstable_HV)
+unstable_HV <- unstable_HV[which(unstable_HV$X3000.ecc<0.7),]
+nrow(unstable_HV)
+
+unstable_intersect <- pca_feature_stability_object_liver$MA_HV_PCA_1
+unstable_intersect <- as.data.frame(unstable_intersect)
+unstable_intersect <- unstable_intersect[which(unstable_intersect$X394.ecc<0.7),]
+nrow(unstable_intersect)
+```
+
+
+
+```{r}
+unstable_feature <- union(union(intersect(rownames(unstable_MA), rownames(unstable_HV)), 
+                                intersect(rownames(unstable_MA), rownames(unstable_intersect))),
+                                intersect(rownames(unstable_HV), rownames(unstable_intersect)))
+unstable_feature
+```
+
+
+
+Similarly, when a cell exhibits instability across multiple clustering methods, it is more likely that the cell's instability stems from its inherent biological nature rather than being a result of methodological stochasticity. Considering the influence of resolution, we obtained the intersection of cells with low ECC values (<0.7) across various resolution values using each clustering method. Within the intersection set, we further proceeded to select cells that demonstrated instability in at least two clustering methods.
+
+```{r}
+unstable_Louvain_df <- clustering_diff_obj_liver_pca$all$Louvain
+unstable_Louvain_df <- as.data.frame(unstable_Louvain_df)
+rownames(unstable_Louvain_df) <- NAFLD_NASH@meta.data$cell_ID
+unstable_Louvain_df$count <- rowSums(unstable_Louvain_df<0.7)
+unstable_Louvain <- unstable_Louvain_df[which(unstable_Louvain_df$count>2),]
+nrow(unstable_Louvain)
+
+unstable_Louvain.refined_df <- clustering_diff_obj_liver_pca$all$Louvain.refined
+unstable_Louvain.refined_df <- as.data.frame(unstable_Louvain.refined_df)
+rownames(unstable_Louvain.refined_df) <- NAFLD_NASH@meta.data$cell_ID
+unstable_Louvain.refined_df$count <- rowSums(unstable_Louvain.refined_df<0.7)
+unstable_Louvain.refined <- unstable_Louvain.refined_df[which(unstable_Louvain.refined_df$count>2),]
+nrow(unstable_Louvain.refined)
+
+unstable_SLM_df <- clustering_diff_obj_liver_pca$all$SLM
+unstable_SLM_df <- as.data.frame(unstable_SLM_df)
+rownames(unstable_SLM_df) <- NAFLD_NASH@meta.data$cell_ID
+unstable_SLM_df$count <- rowSums(unstable_SLM_df<0.7)
+unstable_SLM <- unstable_SLM_df[which(unstable_SLM_df$count>2),]
+nrow(unstable_SLM)
+
+unstable_Leiden_df <- clustering_diff_obj_liver_pca$all$Leiden
+unstable_Leiden_df <- as.data.frame(unstable_Leiden_df)
+rownames(unstable_Leiden_df) <- NAFLD_NASH@meta.data$cell_ID
+unstable_Leiden_df$count <- rowSums(unstable_Leiden_df<0.7)
+unstable_Leiden <- unstable_Leiden_df[which(unstable_Leiden_df$count>2),]
+nrow(unstable_Leiden)
+
+```
+
+
+
+```{r}
+# unstable_methods <- intersect(rownames(unstable_Louvain_df), rownames(unstable_Leiden_df))
+# length(unstable_methods)
+# print(unstable_methods)
+```
+
+
+
+```{r}
+unstable_methods <- c()
+for (j in c(3:6)){
+  for (i in c(1:nrow(unstable_Louvain_df))) {
+    if (count(c(unstable_Louvain_df[i,j], unstable_Louvain.refined_df[i,j], 
+                unstable_SLM_df[i,j], unstable_Leiden_df[i,j])<0.75) >2 ) {
+      unstable_methods <- c(unstable_methods, rownames(unstable_Louvain_df[i,]))
+    }
+  }
+}
+head(unstable_methods)
+length(unstable_methods)
+```
+
+
+
+
+
+```{r}
+# unstable_union <- union(union(unstable_feature, rownames(unstable_Louvain_df)), rownames(unstable_Leiden_df))
+
+# 3526 unstable cells
+# unstable_union <- unique(c(rownames(unstable_MA), rownames(unstable_HV), rownames(unstable_intersect), 
+#                         rownames(unstable_Louvain), rownames(unstable_Leiden)))
+
+
+# 4271 unstable cells
+unstable_union <- unique(c(rownames(unstable_MA), rownames(unstable_HV), rownames(unstable_intersect), 
+                         rownames(unstable_Louvain), rownames(unstable_Leiden), unstable_methods))
+length(unstable_union)
+```
+
+
+Visualization of unstable cells under UMAP embedding
+```{r}
+NAFLD_NASH@meta.data$stability <- NA
+NAFLD_NASH@meta.data[NAFLD_NASH@meta.data$cell_ID %in% unstable_union, "stability"] <- "Unstable"
+NAFLD_NASH@meta.data[!NAFLD_NASH@meta.data$cell_ID %in% unstable_union, "stability"] <- "Stable"
+
+DimPlot(NAFLD_NASH, reduction = "umap_harmonyMA3000theta2", group.by = "stability", cols = c("orange", "green"))
+
+```
+
+
+
+
+
+## remove the potential unstable cells, then train and test to see whether the performace is improved
+```{r}
+# total 10031 cells, 0.9107 accuracy
+# 8676 stable cells, 0.9208 accuracy
+stacking_annotation_stable <- stacking_annotation[!stacking_annotation$cell_ID %in% unstable_union,]
+stacking_true_cell_stable <- factor(stacking_annotation_stable$cell_type, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unknown', 'Cancer Stem cells', 'Hematopoietic'))
+stacking_predict_cell_stable <- factor(stacking_annotation_stable$voting, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unknown', 'Cancer Stem cells', 'Hematopoietic'))
+
+table(stacking_annotation_stable$cell_type, stacking_annotation_stable$voting)
+confusionMatrix(stacking_predict_cell_stable, stacking_true_cell_stable)
+
+
+# 1355 unstable cells, 0.8458 accuracy
+stacking_annotation_unstable <- stacking_annotation[stacking_annotation$cell_ID %in% unstable_union,]
+stacking_true_cell_unstable <- factor(stacking_annotation_unstable$cell_type, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unknown', 'Cancer Stem cells', 'Hematopoietic'))
+stacking_predict_cell_unstable <- factor(stacking_annotation_unstable$voting, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unknown', 'Cancer Stem cells', 'Hematopoietic'))
+
+table(stacking_annotation_unstable$cell_type, stacking_annotation_unstable$voting)
+confusionMatrix(stacking_predict_cell_unstable, stacking_true_cell_unstable)
+
+
+```
+
+
+
+## Compare with only using single tool
+```{r}
+# SCN
+table(stacking_annotation$cell_type, stacking_annotation$SCN)
+SCN_true_cell <- factor(stacking_annotation$cell_type, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells'))
+SCN_predict_cell <- factor(stacking_annotation$SCN, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells'))
+confusionMatrix(SCN_predict_cell, SCN_true_cell)
+```
+
+
+```{r}
+# ScType
+ScType_true_cell <- stacking_annotation[, "cell_type"]
+ScType_predict_cell <- stacking_annotation[, "ScType"]
+
+ScType_true_cell[ScType_true_cell=="Endothelial cells"] <- "Endothelial cell"
+ScType_true_cell[ScType_true_cell=="Stellate cells"] <- "Hepatic stellate cells"
+ScType_true_cell[ScType_true_cell=="Immune cells"] <- "Immune system cells"
+
+  
+ScType_true_cell <- factor(ScType_true_cell, levels = c('Cholangiocytes', 'Endothelial cell', 'Hepatocytes', 'Immune system cells', 'Hepatic stellate cells', 'Hematopoietic cell'))
+ScType_predict_cell <- factor(ScType_predict_cell, levels = c('Cholangiocytes', 'Endothelial cell', 'Hepatocytes', 'Immune system cells', 'Hepatic stellate cells', 'Hematopoietic cell'))
+confusionMatrix(ScType_predict_cell, ScType_true_cell)
+```
+
+
+```{r}
+# Garnett
+Garnett_true_cell <- stacking_annotation[, "cell_type"]
+Garnett_predict_cell <- stacking_annotation[, "Garnett_extend"]
+
+Garnett_predict_cell[Garnett_predict_cell=="B cells pop1"] <- "Immune cells"
+Garnett_predict_cell[Garnett_predict_cell=="Lymphocytes"] <- "Immune cells"
+Garnett_predict_cell[Garnett_predict_cell=="Macrophages"] <- "Immune cells"
+Garnett_predict_cell[Garnett_predict_cell=="Neutrophils"] <- "Immune cells"
+Garnett_predict_cell[Garnett_predict_cell=="Endothelial"] <- "Endothelial cells"
+
+Garnett_true_cell <- factor(Garnett_true_cell, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'Cancer stem cells', 'Unknown'))
+Garnett_predict_cell <- factor(Garnett_predict_cell, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'Cancer stem cells', 'Unknown'))
+confusionMatrix(Garnett_predict_cell, Garnett_true_cell)
+```
+
+
+```{r}
+# Scmap_cluster
+Scmap_cluster_true_cell <- stacking_annotation$cell_type
+Scmap_cluster_predict_cell <- stacking_annotation$Scmap_cluster
+
+  
+Scmap_cluster_true_cell <- factor(Scmap_cluster_true_cell, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unassigned'))
+Scmap_cluster_predict_cell <- factor(Scmap_cluster_predict_cell, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unassigned'))
+confusionMatrix(Scmap_cluster_predict_cell, Scmap_cluster_true_cell)
+```
+
+
+
+```{r}
+# Scmap_cell
+Scmap_cell_true_cell <- stacking_annotation$cell_type
+Scmap_cell_predict_cell <- stacking_annotation$Scmap_cell
+
+  
+Scmap_cell_true_cell <- factor(Scmap_cell_true_cell, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unassigned'))
+Scmap_cell_predict_cell <- factor(Scmap_cell_predict_cell, levels = c('Cholangiocytes', 'Endothelial cells', 'Hepatocytes', 'Immune cells', 'Stellate cells', 'unassigned'))
+confusionMatrix(Scmap_cell_predict_cell, Scmap_cell_true_cell)
+```
+
+
